@@ -1,5 +1,7 @@
 package com.huylq.iotprojectserver.security.user;
 
+import com.huylq.iotprojectserver.security.Role;
+
 import com.huylq.iotprojectserver.audit.AuditService;
 import com.huylq.iotprojectserver.common.error.ApiException;
 import lombok.RequiredArgsConstructor;
@@ -25,8 +27,8 @@ class UserServiceImpl implements UserService {
 
     @Override
     @Transactional
-    public User create(String username, String password, User.Role role,
-                       User.Role callerRole, String callerId, String ip) {
+    public User create(String username, String password, Role role,
+                       Role callerRole, String callerId, String ip) {
         requireAuthorityToGrant(callerRole, role);
         if (userRepo.existsByUsername(username)) {
             throw ApiException.conflict("Username already exists");
@@ -52,7 +54,7 @@ class UserServiceImpl implements UserService {
 
     @Override
     @Transactional(readOnly = true)
-    public List<User> list(User.Role role, User.Status status, int offset, int limit) {
+    public List<User> list(Role role, User.Status status, int offset, int limit) {
         Sort sort = Sort.by(Sort.Direction.DESC, "createdAt");
         var page = userRepo.findAll(filter(role, status),
                 PageRequest.of(offset / Math.max(1, limit), limit, sort));
@@ -61,14 +63,14 @@ class UserServiceImpl implements UserService {
 
     @Override
     @Transactional(readOnly = true)
-    public long count(User.Role role, User.Status status) {
+    public long count(Role role, User.Status status) {
         return userRepo.count(filter(role, status));
     }
 
     @Override
     @Transactional
-    public User update(UUID id, User.Role newRole, User.Status newStatus,
-                       User.Role callerRole, String callerId, String ip) {
+    public User update(UUID id, Role newRole, User.Status newStatus,
+                       Role callerRole, String callerId, String ip) {
         User user = get(id);
         if (newRole != null && newRole != user.getRole()) {
             requireAuthorityToGrant(callerRole, newRole);
@@ -89,7 +91,7 @@ class UserServiceImpl implements UserService {
 
     @Override
     @Transactional
-    public void softDelete(UUID id, User.Role callerRole, String callerId, String ip) {
+    public void softDelete(UUID id, Role callerRole, String callerId, String ip) {
         User user = get(id);
         requireAuthorityToGrant(callerRole, user.getRole()); // need authority over the target's level
         user.setStatus(User.Status.DISABLED);
@@ -99,7 +101,7 @@ class UserServiceImpl implements UserService {
 
     @Override
     @Transactional
-    public void resetPassword(UUID id, String newPassword, User.Role callerRole,
+    public void resetPassword(UUID id, String newPassword, Role callerRole,
                               String callerId, String ip) {
         User user = get(id);
         if (!callerId.equals(id.toString())) {
@@ -118,14 +120,14 @@ class UserServiceImpl implements UserService {
      *   <li>Anything else → {@code 403}.</li>
      * </ul>
      */
-    private static void requireAuthorityToGrant(User.Role caller, User.Role target) {
-        if (caller == User.Role.SUPER_ADMIN) return;
-        if (caller == User.Role.ADMIN
-                && (target == User.Role.OPERATOR || target == User.Role.VIEWER)) return;
+    private static void requireAuthorityToGrant(Role caller, Role target) {
+        if (caller == Role.SUPER_ADMIN) return;
+        if (caller == Role.ADMIN
+                && (target == Role.OPERATOR || target == Role.VIEWER)) return;
         throw ApiException.forbidden("Caller may not manage role " + target);
     }
 
-    private static Specification<User> filter(User.Role role, User.Status status) {
+    private static Specification<User> filter(Role role, User.Status status) {
         return (root, q, cb) -> {
             var preds = new java.util.ArrayList<jakarta.persistence.criteria.Predicate>();
             if (role != null)   preds.add(cb.equal(root.get("role"), role));

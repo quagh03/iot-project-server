@@ -1,5 +1,7 @@
 package com.huylq.iotprojectserver.security;
 
+import com.huylq.iotprojectserver.security.Role;
+
 import tools.jackson.databind.ObjectMapper;
 import com.huylq.iotprojectserver.security.user.User;
 import com.huylq.iotprojectserver.security.user.RefreshTokenRepository;
@@ -30,9 +32,9 @@ class UserCrudIT {
     void clean() {
         refreshRepo.deleteAll();
         userRepo.deleteAll();
-        support.createUser("super", "s3cret-string-32-bytes-long-now", User.Role.SUPER_ADMIN);
-        support.createUser("admin", "s3cret-string-32-bytes-long-now", User.Role.ADMIN);
-        support.createUser("viewer", "s3cret-string-32-bytes-long-now", User.Role.VIEWER);
+        support.createUser("super", "s3cret-string-32-bytes-long-now", Role.SUPER_ADMIN);
+        support.createUser("admin", "s3cret-string-32-bytes-long-now", Role.ADMIN);
+        support.createUser("viewer", "s3cret-string-32-bytes-long-now", Role.VIEWER);
     }
 
     @Test

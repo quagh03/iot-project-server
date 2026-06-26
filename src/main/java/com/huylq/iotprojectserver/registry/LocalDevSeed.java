@@ -1,5 +1,7 @@
 package com.huylq.iotprojectserver.registry;
 
+import com.huylq.iotprojectserver.security.Role;
+
 import com.huylq.iotprojectserver.security.user.User;
 import com.huylq.iotprojectserver.security.user.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -107,7 +109,7 @@ public class LocalDevSeed {
         userRepo.save(User.builder()
                 .username("admin")
                 .passwordHash(passwordEncoder.encode("changeme"))
-                .role(User.Role.SUPER_ADMIN)
+                .role(Role.SUPER_ADMIN)
                 .status(User.Status.ACTIVE)
                 .build());
     }

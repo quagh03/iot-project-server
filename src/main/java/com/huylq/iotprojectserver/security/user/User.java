@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.security.user;
 
+import com.huylq.iotprojectserver.security.Role;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -48,10 +49,6 @@ public class User {
     @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt;
-
-    public enum Role {
-        SUPER_ADMIN, ADMIN, OPERATOR, VIEWER
-    }
 
     public enum Status {
         ACTIVE, DISABLED

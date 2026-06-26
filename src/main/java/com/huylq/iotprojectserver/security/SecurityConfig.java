@@ -39,6 +39,8 @@ import org.springframework.security.web.authentication.AuthenticationConverter;
 import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -48,6 +50,20 @@ import java.util.stream.Stream;
 public class SecurityConfig {
 
     private final JwtConfig jwtConfig;
+    private static final String[] PUBLIC_ENDPOINTS = {
+        "/api/v1/auth/login",
+        "/api/v1/auth/refresh",
+        "/api/v1/auth/logout",
+        "/api/v1/oauth2/token",
+        "/actuator/health",
+        "/actuator/info",
+        "/api/v1/api-docs/**",
+        "/api/v1/swagger-ui.html",
+        "/api/v1/swagger-ui/**",
+        "/v3/api-docs/**",
+        "/swagger-ui/**",
+        "/swagger-ui.html"
+    };
 
     @Bean
     PasswordEncoder passwordEncoder() {
@@ -57,11 +73,15 @@ public class SecurityConfig {
 
     @Bean
     RoleHierarchy roleHierarchy() {
-        return RoleHierarchyImpl.withDefaultRolePrefix()
-                .role("SUPER_ADMIN").implies("ADMIN")
-                .role("ADMIN").implies("OPERATOR")
-                .role("OPERATOR").implies("VIEWER")
-                .build();
+        // Derives from Role declaration order — adding a role anywhere in the enum
+        // automatically inserts it into the ladder. Each role implies the next so
+        // a SUPER_ADMIN satisfies hasRole('VIEWER').
+        Role[] ladder = Role.values();
+        var builder = RoleHierarchyImpl.withDefaultRolePrefix();
+        for (int i = 0; i < ladder.length - 1; i++) {
+            builder = builder.role(ladder[i].name()).implies(ladder[i + 1].name());
+        }
+        return builder.build();
     }
 
     @Bean
@@ -108,19 +128,7 @@ public class SecurityConfig {
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers(
-                                "/api/v1/auth/login",
-                                "/api/v1/auth/refresh",
-                                "/api/v1/auth/logout",
-                                "/api/v1/oauth2/token",
-                                "/actuator/health",
-                                "/actuator/info",
-                                "/api/v1/api-docs/**",
-                                "/api/v1/swagger-ui.html",
-                                "/api/v1/swagger-ui/**",
-                                "/v3/api-docs/**",
-                                "/swagger-ui/**",
-                                "/swagger-ui.html").permitAll()
+                        .requestMatchers(PUBLIC_ENDPOINTS).permitAll()
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(rs -> rs.jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthConverter)))
                 .exceptionHandling(eh -> eh

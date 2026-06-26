@@ -1,5 +1,7 @@
 package com.huylq.iotprojectserver.security;
 
+import com.huylq.iotprojectserver.security.Role;
+
 import tools.jackson.databind.ObjectMapper;
 import com.huylq.iotprojectserver.security.user.User;
 import com.huylq.iotprojectserver.security.user.RefreshTokenRepository;
@@ -31,7 +33,7 @@ class AuthFlowIT {
     void clean() {
         refreshRepo.deleteAll();
         userRepo.deleteAll();
-        support.createUser("ada", "correct-horse-battery-staple", User.Role.OPERATOR);
+        support.createUser("ada", "correct-horse-battery-staple", Role.OPERATOR);
     }
 
     @Test

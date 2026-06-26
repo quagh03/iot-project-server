@@ -1,5 +1,7 @@
 package com.huylq.iotprojectserver.support;
 
+import com.huylq.iotprojectserver.security.Role;
+
 import tools.jackson.databind.ObjectMapper;
 import com.huylq.iotprojectserver.security.user.User;
 import com.huylq.iotprojectserver.security.user.UserRepository;
@@ -19,7 +21,7 @@ public class SecurityTestSupport {
     @Autowired PasswordEncoder passwordEncoder;
     @Autowired ObjectMapper mapper;
 
-    public User createUser(String username, String password, User.Role role) {
+    public User createUser(String username, String password, Role role) {
         return userRepo.save(User.builder()
                 .username(username)
                 .passwordHash(passwordEncoder.encode(password))

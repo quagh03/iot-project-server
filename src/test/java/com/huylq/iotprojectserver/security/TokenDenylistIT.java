@@ -1,5 +1,7 @@
 package com.huylq.iotprojectserver.security;
 
+import com.huylq.iotprojectserver.security.Role;
+
 import com.huylq.iotprojectserver.security.user.User;
 import com.huylq.iotprojectserver.security.user.RefreshTokenRepository;
 import com.huylq.iotprojectserver.security.user.UserRepository;
@@ -30,7 +32,7 @@ class TokenDenylistIT {
     void clean() {
         refreshRepo.deleteAll();
         userRepo.deleteAll();
-        support.createUser("ada", "correct-horse-battery-staple", User.Role.ADMIN);
+        support.createUser("ada", "correct-horse-battery-staple", Role.ADMIN);
     }
 
     @Test

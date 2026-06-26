@@ -1,5 +1,7 @@
 package com.huylq.iotprojectserver.api;
 
+import com.huylq.iotprojectserver.security.Role;
+
 import com.huylq.iotprojectserver.api.dto.user.CreateUserRequest;
 import com.huylq.iotprojectserver.api.dto.user.PasswordResetRequest;
 import com.huylq.iotprojectserver.api.dto.user.UpdateUserRequest;
@@ -33,7 +35,7 @@ public class UserController {
 
     @GetMapping
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<PagedResponse<UserDto>> list(@RequestParam(required = false) User.Role role,
+    public ResponseEntity<PagedResponse<UserDto>> list(@RequestParam(required = false) Role role,
                                                        @RequestParam(required = false) User.Status status,
                                                        @RequestParam(defaultValue = "0") int offset,
                                                        @RequestParam(required = false) Integer pageSize) {
@@ -86,9 +88,9 @@ public class UserController {
         return ResponseEntity.noContent().build();
     }
 
-    private static User.Role callerRole(Jwt jwt) {
+    private static Role callerRole(Jwt jwt) {
         String role = jwt.getClaimAsString("role");
         if (role == null) throw ApiException.forbidden("Missing role on caller token");
-        return User.Role.valueOf(role);
+        return Role.valueOf(role);
     }
 }

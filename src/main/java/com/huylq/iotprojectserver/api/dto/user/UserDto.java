@@ -1,5 +1,7 @@
 package com.huylq.iotprojectserver.api.dto.user;
 
+import com.huylq.iotprojectserver.security.Role;
+
 import com.huylq.iotprojectserver.security.user.User;
 
 import java.time.OffsetDateTime;
@@ -10,7 +12,7 @@ import java.time.OffsetDateTime;
 public record UserDto(
         String id,
         String username,
-        User.Role role,
+        Role role,
         User.Status status,
         OffsetDateTime createdAt) {
 
