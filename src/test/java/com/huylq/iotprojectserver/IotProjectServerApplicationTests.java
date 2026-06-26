@@ -1,13 +1,12 @@
 package com.huylq.iotprojectserver;
 
+import com.huylq.iotprojectserver.support.PostgresIntegrationTest;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
 
-@SpringBootTest
+@PostgresIntegrationTest
 class IotProjectServerApplicationTests {
 
-  @Test
-  void contextLoads() {
-  }
-
+    @Test
+    void contextLoads() {
+    }
 }
