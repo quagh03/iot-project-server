@@ -1,0 +1,1419 @@
+openapi: 3.0.3
+info:
+  title: Office IoT Monitoring & Control — REST API
+  description: >
+    REST edge for the Office IoT Monitoring & Control platform: dashboard
+    (current state, history, alerts, command status), administration (device
+    registry & lifecycle, credentials, users/RBAC, rules, audit), and the
+    device HTTP ingest fallback (telemetry, heartbeat). The MQTT
+    telemetry/command/heartbeat path is a separate async contract and is not
+    described here. Errors follow RFC 9457 (Problem Details). Timestamps are
+    ISO-8601 UTC. JSON is camelCase.
+  version: 1.0.0
+  contact:
+    name: IoT Platform Team
+servers:
+  - url: https://{host}/api/v1
+    description: Production / staging
+    variables:
+      host:
+        default: api.iot.example.com
+
+tags:
+  - name: Authentication
+    description: User sign-in and device token issuance.
+  - name: Users
+    description: Operator accounts and RBAC (admin).
+  - name: Devices
+    description: Device registry and lifecycle (admin / dashboard read).
+  - name: Device Credentials
+    description: Device client-credentials and scopes (admin).
+  - name: Telemetry
+    description: HTTP fallback ingest and time-series history query.
+  - name: Current State
+    description: Latest per-sensor readings and device connectivity (dashboard hot path).
+  - name: Heartbeat
+    description: HTTP fallback connectivity upsert.
+  - name: Commands
+    description: Actuator command issue and lifecycle status.
+  - name: Rules
+    description: Rule engine CRUD (admin).
+  - name: Alerts
+    description: Alert listing and acknowledgement / resolution.
+  - name: Audit
+    description: Append-only audit log query (admin).
+
+security:
+  - userBearer: []
+
+paths:
+
+  # ---------------------------------------------------------------- Auth
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: User sign-in
+      description: Exchange username/password for an access token and a rotating refresh token. Rate-limited to 20/min.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      summary: Rotate refresh token
+      description: Mint a new access token and rotate the refresh token (old one revoked). Reuse of a revoked token returns 401.
+      operationId: refresh
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: Refreshed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Revoke the presented refresh token
+      operationId: logout
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '204': { description: Token revoked. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /oauth2/token:
+    post:
+      tags: [Authentication]
+      summary: Device client-credentials grant
+      description: >
+        OAuth2 client-credentials token endpoint for devices. Granted scopes are
+        the intersection of the device's stored scopes and any requested. The
+        resulting token may be used only for telemetry/heartbeat ingest fallback.
+      operationId: deviceToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/DeviceTokenRequest' }
+      responses:
+        '200':
+          description: Device access token issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceTokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- Users
+  /users:
+    get:
+      tags: [Users]
+      summary: List users
+      operationId: listUsers
+      parameters:
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/Role' } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/UserStatus' } }
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: Page of users.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/User' }
+                  page: { $ref: '#/components/schemas/OffsetPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Users]
+      summary: Create a user
+      operationId: createUser
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUserRequest' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /users/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [Users]
+      summary: Read a user
+      operationId: getUser
+      responses:
+        '200':
+          description: User.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Users]
+      summary: Update role / status
+      operationId: updateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateUserRequest' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      tags: [Users]
+      summary: Soft-delete a user
+      description: Sets status DISABLED and revokes the user's refresh tokens.
+      operationId: deleteUser
+      responses:
+        '204': { description: Disabled. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /users/{userId}/password-reset:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      tags: [Users]
+      summary: Issue a password reset
+      description: Triggers a reset flow. No plaintext password is accepted or returned.
+      operationId: resetUserPassword
+      responses:
+        '204': { description: Reset initiated. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- Devices
+  /devices:
+    get:
+      tags: [Devices]
+      summary: List devices
+      operationId: listDevices
+      parameters:
+        - $ref: '#/components/parameters/ZoneFilter'
+        - { name: category, in: query, schema: { $ref: '#/components/schemas/DeviceCategory' } }
+        - { name: deviceType, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/DeviceStatus' } }
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: Page of devices.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Device' }
+                  page: { $ref: '#/components/schemas/OffsetPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Devices]
+      summary: Register a device
+      operationId: registerDevice
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterDeviceRequest' }
+      responses:
+        '201':
+          description: Registered.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /devices/{deviceId}:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      tags: [Devices]
+      summary: Read a device
+      operationId: getDevice
+      responses:
+        '200':
+          description: Device.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Devices]
+      summary: Update device metadata
+      description: Update firmware version, zone, or device type.
+      operationId: updateDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateDeviceRequest' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /devices/{deviceId}/sensors:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      tags: [Devices]
+      summary: List sensors parented by a gateway
+      operationId: listGatewaySensors
+      responses:
+        '200':
+          description: Sensors.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Sensor' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  '/devices/{deviceId}:activate':
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    post:
+      tags: [Devices]
+      summary: Activate a device
+      description: Transition INACTIVE/SUSPENDED to ACTIVE.
+      operationId: activateDevice
+      responses:
+        '204': { description: Activated. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  '/devices/{deviceId}:suspend':
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    post:
+      tags: [Devices]
+      summary: Suspend a device
+      description: Transition ACTIVE to SUSPENDED; disables the device's credentials.
+      operationId: suspendDevice
+      responses:
+        '204': { description: Suspended. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  '/devices/{deviceId}:decommission':
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    post:
+      tags: [Devices]
+      summary: Decommission a device
+      description: Terminal transition; revokes credentials and broker topic ACLs. Irreversible.
+      operationId: decommissionDevice
+      responses:
+        '204': { description: Decommissioned. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ------------------------------------------------ Device credentials & scopes
+  /devices/{deviceId}/credentials:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      tags: [Device Credentials]
+      summary: Read credential metadata
+      description: Returns clientId and rotation metadata only. The secret is never readable after issue.
+      operationId: getDeviceCredentialMetadata
+      responses:
+        '200':
+          description: Credential metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialMetadata' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Device Credentials]
+      summary: Issue first credential
+      description: Issues a client_id/client_secret. The secret is shown exactly once.
+      operationId: issueDeviceCredential
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: Credential issued (secret shown once).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialSecret' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  '/devices/{deviceId}/credentials:rotate':
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    post:
+      tags: [Device Credentials]
+      summary: Rotate credential
+      description: Issues a new secret (shown once); the previous secret stays valid for a grace window.
+      operationId: rotateDeviceCredential
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Rotated (secret shown once).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialSecret' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /devices/{deviceId}/scopes:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      tags: [Device Credentials]
+      summary: List granted scopes
+      operationId: getDeviceScopes
+      responses:
+        '200':
+          description: Scope set.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScopeSet' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Device Credentials]
+      summary: Replace the scope set
+      operationId: replaceDeviceScopes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScopeSet' }
+      responses:
+        '200':
+          description: Replaced.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScopeSet' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  # ---------------------------------------------------------------- Telemetry
+  /telemetry:
+    post:
+      tags: [Telemetry]
+      summary: HTTP fallback ingest
+      description: >
+        Accept a batch of readings when MQTT is unavailable. Payload shape is
+        validated synchronously; persistence and rule hand-off are asynchronous.
+        Device-authenticated; the token must carry scope telemetry:publish.
+      operationId: ingestTelemetry
+      security:
+        - deviceOAuth: ['telemetry:publish']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TelemetryBatch' }
+      responses:
+        '202': { description: Accepted for processing. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    get:
+      tags: [Telemetry]
+      summary: Query telemetry history
+      description: >
+        Cursor-paged time-series query. Exactly one of sensorId or zone is
+        required, plus a bounded time window — these map to the indexed query
+        shapes. Missing scope or an unbounded window returns 422.
+      operationId: queryTelemetry
+      parameters:
+        - { name: sensorId, in: query, schema: { type: string } }
+        - $ref: '#/components/parameters/ZoneFilter'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page of readings.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/TelemetryReading' }
+                  page: { $ref: '#/components/schemas/CursorPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  # -------------------------------------------------------------- Current state
+  /current-state:
+    get:
+      tags: [Current State]
+      summary: Latest reading per sensor
+      description: Dashboard hot path served from sensor_latest. Eventually consistent by one sample.
+      operationId: getCurrentState
+      parameters:
+        - $ref: '#/components/parameters/ZoneFilter'
+      responses:
+        '200':
+          description: Latest readings.
+          headers:
+            Cache-Control: { schema: { type: string }, description: Short max-age for polling clients. }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/CurrentStateItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /sensors/{sensorId}/latest:
+    parameters:
+      - $ref: '#/components/parameters/SensorId'
+    get:
+      tags: [Current State]
+      summary: Latest reading for one sensor
+      operationId: getSensorLatest
+      responses:
+        '200':
+          description: Latest reading.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CurrentStateItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /devices/{deviceId}/health:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      tags: [Current State]
+      summary: Latest device health & connectivity
+      operationId: getDeviceHealth
+      responses:
+        '200':
+          description: Health.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceHealth' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /connectivity:
+    get:
+      tags: [Current State]
+      summary: Online/offline roll-up
+      operationId: getConnectivity
+      parameters:
+        - $ref: '#/components/parameters/ZoneFilter'
+      responses:
+        '200':
+          description: Connectivity summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConnectivitySummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ---------------------------------------------------------------- Heartbeat
+  /heartbeat:
+    post:
+      tags: [Heartbeat]
+      summary: HTTP fallback heartbeat
+      description: >
+        Upsert the calling device's latest health row. The authenticated device
+        identity must match the body deviceId, otherwise 403. Device-authenticated
+        with scope heartbeat:publish.
+      operationId: ingestHeartbeat
+      security:
+        - deviceOAuth: ['heartbeat:publish']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HeartbeatRequest' }
+      responses:
+        '202': { description: Accepted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  # ---------------------------------------------------------------- Commands
+  /commands:
+    get:
+      tags: [Commands]
+      summary: List commands
+      operationId: listCommands
+      parameters:
+        - { name: targetId, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/CommandStatus' } }
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page of commands.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Command' }
+                  page: { $ref: '#/components/schemas/CursorPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Commands]
+      summary: Issue a command
+      description: >
+        Persist a command and publish it to the actuator over MQTT. Returns 202
+        because the actuator effect is asynchronous; poll GET /commands/{id} for
+        lifecycle status. Idempotency-Key is required so QoS-1 retries are safe.
+      operationId: issueCommand
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IssueCommandRequest' }
+      responses:
+        '202':
+          description: Command accepted (PENDING).
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommandAck' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /commands/{commandId}:
+    parameters:
+      - $ref: '#/components/parameters/CommandId'
+    get:
+      tags: [Commands]
+      summary: Command status / lifecycle
+      operationId: getCommand
+      responses:
+        '200':
+          description: Command.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Command' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- Rules
+  /rules:
+    get:
+      tags: [Rules]
+      summary: List rules
+      operationId: listRules
+      parameters:
+        - { name: enabled, in: query, schema: { type: boolean } }
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: Page of rules.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Rule' }
+                  page: { $ref: '#/components/schemas/OffsetPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Rules]
+      summary: Create a rule
+      description: condition/action are validated against the restricted expression grammar on write.
+      operationId: createRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RuleInput' }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Rule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /rules/{ruleId}:
+    parameters:
+      - $ref: '#/components/parameters/RuleId'
+    get:
+      tags: [Rules]
+      summary: Read a rule
+      operationId: getRule
+      responses:
+        '200':
+          description: Rule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Rule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Rules]
+      summary: Replace a rule
+      operationId: replaceRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RuleInput' }
+      responses:
+        '200':
+          description: Replaced.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Rule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    patch:
+      tags: [Rules]
+      summary: Toggle enabled / change priority
+      operationId: updateRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RulePatch' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Rule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      tags: [Rules]
+      summary: Delete a rule
+      operationId: deleteRule
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---------------------------------------------------------------- Alerts
+  /alerts:
+    get:
+      tags: [Alerts]
+      summary: List alerts
+      operationId: listAlerts
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/AlertStatus' } }
+        - $ref: '#/components/parameters/ZoneFilter'
+        - { name: severity, in: query, schema: { $ref: '#/components/schemas/Severity' } }
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page of alerts.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Alert' }
+                  page: { $ref: '#/components/schemas/CursorPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /alerts/{alertId}:
+    parameters:
+      - $ref: '#/components/parameters/AlertId'
+    get:
+      tags: [Alerts]
+      summary: Read an alert
+      operationId: getAlert
+      responses:
+        '200':
+          description: Alert.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  '/alerts/{alertId}:acknowledge':
+    parameters:
+      - $ref: '#/components/parameters/AlertId'
+    post:
+      tags: [Alerts]
+      summary: Acknowledge an alert
+      description: Transition OPEN to ACK.
+      operationId: acknowledgeAlert
+      responses:
+        '200':
+          description: Acknowledged.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  '/alerts/{alertId}:resolve':
+    parameters:
+      - $ref: '#/components/parameters/AlertId'
+    post:
+      tags: [Alerts]
+      summary: Resolve an alert
+      description: Transition to RESOLVED.
+      operationId: resolveAlert
+      responses:
+        '200':
+          description: Resolved.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ---------------------------------------------------------------- Audit
+  /audit-logs:
+    get:
+      tags: [Audit]
+      summary: Query audit logs
+      description: Append-only. Requires a bounded time window like telemetry.
+      operationId: queryAuditLogs
+      parameters:
+        - { name: actor, in: query, schema: { type: string } }
+        - { name: actorType, in: query, schema: { $ref: '#/components/schemas/ActorType' } }
+        - { name: event, in: query, schema: { type: string } }
+        - { name: target, in: query, schema: { type: string } }
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page of audit entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/AuditLog' }
+                  page: { $ref: '#/components/schemas/CursorPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+# ============================================================== Components
+components:
+
+  securitySchemes:
+    userBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: User JWT access token (1 h). Carries role for RBAC.
+    deviceOAuth:
+      type: oauth2
+      description: Device client-credentials token, gated by scopes.
+      flows:
+        clientCredentials:
+          tokenUrl: https://api.iot.example.com/api/v1/oauth2/token
+          scopes:
+            telemetry:publish: Publish telemetry readings.
+            heartbeat:publish: Publish heartbeat / health.
+            command:subscribe: Subscribe to commands (MQTT).
+            command:ack: Acknowledge commands (MQTT).
+
+  headers:
+    Location:
+      description: URI of the created or referenced resource.
+      schema: { type: string, format: uri }
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: { type: integer }
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-generated UUID; the original result is returned on retry within 24 h.
+      schema: { type: string, format: uuid }
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-generated UUID; required so at-least-once retries do not duplicate effects.
+      schema: { type: string, format: uuid }
+    PageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor from a previous page's nextCursor.
+      schema: { type: string }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0, default: 0 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Sort:
+      name: sort
+      in: query
+      description: Field name; prefix with '-' for descending (e.g. -createdAt).
+      schema: { type: string }
+    From:
+      name: from
+      in: query
+      description: Inclusive start of time window (ISO-8601 UTC).
+      schema: { type: string, format: date-time }
+    To:
+      name: to
+      in: query
+      description: Exclusive end of time window (ISO-8601 UTC).
+      schema: { type: string, format: date-time }
+    ZoneFilter:
+      name: zone
+      in: query
+      schema: { type: string }
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string }
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      schema: { type: string }
+    SensorId:
+      name: sensorId
+      in: path
+      required: true
+      schema: { type: string }
+    CommandId:
+      name: commandId
+      in: path
+      required: true
+      schema: { type: string }
+    RuleId:
+      name: ruleId
+      in: path
+      required: true
+      schema: { type: string }
+    AlertId:
+      name: alertId
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    Unauthorized:
+      description: Not authenticated.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    Forbidden:
+      description: Authenticated but not allowed (role or scope).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    Conflict:
+      description: State conflict (duplicate, lifecycle, or version).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    UnprocessableEntity:
+      description: Well-formed but semantically invalid.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  schemas:
+
+    # ----- shared / enums
+    ProblemDetail:
+      type: object
+      description: RFC 9457 Problem Details.
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        errors:
+          type: array
+          items: { $ref: '#/components/schemas/FieldError' }
+    FieldError:
+      type: object
+      properties:
+        field: { type: string }
+        message: { type: string }
+    CursorPage:
+      type: object
+      properties:
+        nextCursor: { type: string, nullable: true }
+        hasMore: { type: boolean }
+        pageSize: { type: integer }
+    OffsetPage:
+      type: object
+      properties:
+        offset: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+    Role:
+      type: string
+      enum: [SUPER_ADMIN, ADMIN, OPERATOR, VIEWER]
+    UserStatus:
+      type: string
+      enum: [ACTIVE, DISABLED]
+    DeviceCategory:
+      type: string
+      enum: [gateway, sensor, actuator]
+    DeviceStatus:
+      type: string
+      enum: [ACTIVE, INACTIVE, SUSPENDED, DECOMMISSIONED]
+    CommandStatus:
+      type: string
+      enum: [PENDING, RECEIVED, SUCCESS, FAILED, TIMEOUT]
+    AlertStatus:
+      type: string
+      enum: [OPEN, ACK, RESOLVED]
+    Severity:
+      type: string
+      enum: [INFO, WARNING, CRITICAL]
+    ActorType:
+      type: string
+      enum: [USER, DEVICE, SYSTEM]
+
+    # ----- auth
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string }
+    TokenResponse:
+      type: object
+      properties:
+        accessToken: { type: string }
+        tokenType: { type: string, example: Bearer }
+        expiresIn: { type: integer, example: 3600 }
+        refreshToken: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+    DeviceTokenRequest:
+      type: object
+      required: [grant_type, client_id, client_secret]
+      properties:
+        grant_type: { type: string, enum: [client_credentials] }
+        client_id: { type: string }
+        client_secret: { type: string }
+        scope: { type: string, description: Space-delimited requested scopes. }
+    DeviceTokenResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer }
+        scope: { type: string }
+
+    # ----- users
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        username: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        status: { $ref: '#/components/schemas/UserStatus' }
+        createdAt: { type: string, format: date-time }
+    CreateUserRequest:
+      type: object
+      required: [username, password, role]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+        role: { $ref: '#/components/schemas/Role' }
+    UpdateUserRequest:
+      type: object
+      properties:
+        role: { $ref: '#/components/schemas/Role' }
+        status: { $ref: '#/components/schemas/UserStatus' }
+
+    # ----- devices
+    Device:
+      type: object
+      properties:
+        deviceId: { type: string }
+        category: { $ref: '#/components/schemas/DeviceCategory' }
+        deviceType: { type: string, example: temp }
+        zone: { type: string }
+        parentGatewayId: { type: string, nullable: true }
+        firmwareVersion: { type: string }
+        status: { $ref: '#/components/schemas/DeviceStatus' }
+        protocols:
+          type: array
+          items: { type: string }
+        createdAt: { type: string, format: date-time }
+    RegisterDeviceRequest:
+      type: object
+      required: [deviceId, category, deviceType, zone]
+      properties:
+        deviceId: { type: string }
+        category: { $ref: '#/components/schemas/DeviceCategory' }
+        deviceType: { type: string }
+        zone: { type: string }
+        parentGatewayId: { type: string, nullable: true, description: Required when category is sensor. }
+        firmwareVersion: { type: string }
+        protocols:
+          type: array
+          items: { type: string }
+    UpdateDeviceRequest:
+      type: object
+      properties:
+        zone: { type: string }
+        deviceType: { type: string }
+        firmwareVersion: { type: string }
+    Sensor:
+      type: object
+      properties:
+        sensorId: { type: string }
+        gatewayId: { type: string }
+        type: { type: string }
+        zone: { type: string }
+
+    # ----- credentials & scopes
+    CredentialSecret:
+      type: object
+      description: Returned exactly once on issue/rotation.
+      properties:
+        clientId: { type: string }
+        clientSecret: { type: string, description: Shown once; reissue or rotate if lost. }
+        rotatedAt: { type: string, format: date-time }
+        graceExpiresAt: { type: string, format: date-time, nullable: true }
+    CredentialMetadata:
+      type: object
+      properties:
+        clientId: { type: string }
+        rotatedAt: { type: string, format: date-time }
+    ScopeSet:
+      type: object
+      required: [scopes]
+      properties:
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [telemetry:publish, command:subscribe, command:ack, heartbeat:publish]
+
+    # ----- telemetry
+    TelemetryReadingInput:
+      type: object
+      required: [sensorId, sensorType, ts]
+      properties:
+        sensorId: { type: string }
+        sensorType: { type: string }
+        valueNum: { type: number, format: double, nullable: true, description: Present for numeric sensors. }
+        valueBool: { type: boolean, nullable: true, description: Present for boolean sensors. }
+        unit: { type: string, nullable: true }
+        ts: { type: string, format: date-time }
+    TelemetryBatch:
+      type: object
+      required: [gatewayId, zone, readings]
+      properties:
+        gatewayId: { type: string }
+        zone: { type: string }
+        readings:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/TelemetryReadingInput' }
+    TelemetryReading:
+      type: object
+      properties:
+        sensorId: { type: string }
+        zone: { type: string }
+        sensorType: { type: string }
+        valueNum: { type: number, format: double, nullable: true }
+        valueBool: { type: boolean, nullable: true }
+        unit: { type: string, nullable: true }
+        ts: { type: string, format: date-time }
+
+    # ----- current state / health
+    CurrentStateItem:
+      type: object
+      properties:
+        sensorId: { type: string }
+        zone: { type: string }
+        sensorType: { type: string }
+        valueNum: { type: number, format: double, nullable: true }
+        valueBool: { type: boolean, nullable: true }
+        unit: { type: string, nullable: true }
+        ts: { type: string, format: date-time }
+    DeviceHealth:
+      type: object
+      properties:
+        deviceId: { type: string }
+        connectionStatus: { type: string, enum: [ONLINE, OFFLINE] }
+        lastSeen: { type: string, format: date-time }
+        memoryUsagePct: { type: integer }
+        cpuUsagePct: { type: integer }
+        wifiRssi: { type: integer }
+        updatedAt: { type: string, format: date-time }
+    ConnectivitySummary:
+      type: object
+      properties:
+        online: { type: integer }
+        offline: { type: integer }
+        total: { type: integer }
+        offlineDevices:
+          type: array
+          items: { type: string }
+
+    # ----- heartbeat
+    HeartbeatRequest:
+      type: object
+      required: [deviceId]
+      properties:
+        deviceId: { type: string }
+        memoryUsagePct: { type: integer }
+        cpuUsagePct: { type: integer }
+        wifiRssi: { type: integer }
+
+    # ----- commands
+    IssueCommandRequest:
+      type: object
+      required: [targetId, type, action]
+      properties:
+        targetId: { type: string }
+        type: { type: string, example: actuator }
+        action: { type: string, example: SET }
+        parameters:
+          type: object
+          additionalProperties: true
+          example: { status: ON }
+    CommandAck:
+      type: object
+      properties:
+        commandId: { type: string }
+        status: { $ref: '#/components/schemas/CommandStatus' }
+        issuedAt: { type: string, format: date-time }
+    Command:
+      type: object
+      properties:
+        commandId: { type: string }
+        targetId: { type: string }
+        type: { type: string }
+        action: { type: string }
+        parameters:
+          type: object
+          additionalProperties: true
+        status: { $ref: '#/components/schemas/CommandStatus' }
+        issuedBy: { type: string, description: "User id, rule id, or system." }
+        issuedAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time, nullable: true }
+        executedAt: { type: string, format: date-time, nullable: true }
+
+    # ----- rules
+    Rule:
+      type: object
+      properties:
+        ruleId: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        condition: { type: string, example: "office_1.smoke == true" }
+        action: { type: string, example: "command(act_exhaust_1, SET, {status: ON}); alert(SMOKE, CRITICAL)" }
+        priority: { type: integer }
+        createdBy: { type: string }
+    RuleInput:
+      type: object
+      required: [name, condition, action]
+      properties:
+        name: { type: string }
+        enabled: { type: boolean, default: true }
+        condition: { type: string }
+        action: { type: string }
+        priority: { type: integer, default: 0 }
+    RulePatch:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        priority: { type: integer }
+
+    # ----- alerts
+    Alert:
+      type: object
+      properties:
+        alertId: { type: string }
+        type: { type: string, example: SMOKE }
+        severity: { $ref: '#/components/schemas/Severity' }
+        zone: { type: string }
+        sourceDeviceId: { type: string }
+        message: { type: string }
+        status: { $ref: '#/components/schemas/AlertStatus' }
+        createdAt: { type: string, format: date-time }
+
+    # ----- audit
+    AuditLog:
+      type: object
+      properties:
+        id: { type: string }
+        ts: { type: string, format: date-time }
+        actor: { type: string }
+        actorType: { $ref: '#/components/schemas/ActorType' }
+        event: { type: string }
+        target: { type: string }
+        detail:
+          type: object
+          additionalProperties: true
+        ip: { type: string }
