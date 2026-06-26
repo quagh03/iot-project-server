@@ -26,9 +26,9 @@ management:
 
 springdoc:
   api-docs:
-    path: /v1/api-docs
+    path: /api/v1/api-docs
   swagger-ui:
-    path: /v1/swagger-ui.html
+    path: /api/v1/swagger-ui.html
 
 iot:
   rate-limit:

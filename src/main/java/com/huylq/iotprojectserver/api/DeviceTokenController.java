@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.api;
 
+import com.huylq.iotprojectserver.api.dto.auth.DeviceTokenResponse;
 import com.huylq.iotprojectserver.common.error.ApiException;
 import com.huylq.iotprojectserver.common.error.ErrorType;
 import com.huylq.iotprojectserver.security.device.DeviceTokenService;
@@ -13,7 +14,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Arrays;
-import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -32,7 +32,7 @@ public class DeviceTokenController {
     private final DeviceTokenService deviceTokenService;
 
     @PostMapping(consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE)
-    public ResponseEntity<Map<String, Object>> token(@RequestParam("grant_type") String grantType,
+    public ResponseEntity<DeviceTokenResponse> token(@RequestParam("grant_type") String grantType,
                                                      @RequestParam("client_id") String clientId,
                                                      @RequestParam("client_secret") String clientSecret,
                                                      @RequestParam(value = "scope", required = false) String scope) {
@@ -48,10 +48,10 @@ public class DeviceTokenController {
         DeviceTokenService.DeviceTokenResult result =
                 deviceTokenService.mint(clientId, clientSecret, requested);
 
-        return ResponseEntity.ok(Map.of(
-                "access_token", result.accessToken(),
-                "token_type", "Bearer",
-                "expires_in", result.expiresInSeconds(),
-                "scope", String.join(" ", result.grantedScopes())));
+        return ResponseEntity.ok(new DeviceTokenResponse(
+                result.accessToken(),
+                "Bearer",
+                result.expiresInSeconds(),
+                String.join(" ", result.grantedScopes())));
     }
 }
