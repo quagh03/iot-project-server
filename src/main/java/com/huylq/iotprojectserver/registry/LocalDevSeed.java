@@ -35,6 +35,7 @@ public class LocalDevSeed {
         return args -> {
             seedDevices();
             seedAdmin();
+            seedViewer();
         };
     }
 
@@ -113,4 +114,18 @@ public class LocalDevSeed {
                 .status(User.Status.ACTIVE)
                 .build());
     }
+
+    @Transactional
+    void seedViewer() {
+        if (userRepo.existsByUsername("user")) return;
+        log.info("Seeding bootstrap viewer user: user / changeme");
+        userRepo.save(User.builder()
+            .username("user")
+            .passwordHash(passwordEncoder.encode("changeme"))
+            .role(Role.VIEWER)
+            .status(User.Status.ACTIVE)
+            .build());
+    }
+
+
 }
