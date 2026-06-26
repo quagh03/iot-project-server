@@ -13,6 +13,52 @@
 - The two design documents remain authoritative: the **Data Spec** wins for wire formats; the **System Design** wins for structure/decisions; the **API Design / OpenAPI** wins for REST contracts.
 - The **Coverage Matrix** at the end maps every one of the 44 REST operations and every load-bearing decision to a phase — use it to confirm nothing is dropped.
 
+---
+
+## Current implementation status (security audit, 2026-06-26)
+
+A code-vs-design (§7) audit produced this phase-completion snapshot. Each phase header below carries a status badge; full details are in the phase sections.
+
+| Phase | Status | Headline |
+|---|---|---|
+| **0** Foundation & Scaffolding | ✅ **DONE** | Modular monolith skeleton, RFC 9457 errors, Flyway, OpenAPI, pagination + idempotency infra, common enums all in place. |
+| **1** Persistence & Data Model | ✅ **DONE** | All 13 tables migrated (V1) + V2 added `TECHNICIAN` to the role ladder. Monthly partitioning automated via `PartitionManager`; audit writer (`AuditService.append`) wired and running in `REQUIRES_NEW`. |
+| **2** Security & Identity | ✅ **DONE** | OAuth2 resource server, Argon2id, `@PreAuthorize` + 5-level role hierarchy (SUPER_ADMIN > ADMIN > OPERATOR > TECHNICIAN > VIEWER), refresh-token rotation, device client-credentials with scope intersection, rate-limit filter, security headers. |
+| **2.5** Token Revocation & Denylist | ✅ **DONE** | `DenylistJwtValidator` chained for user *and* device tokens; access-`jti` + refresh-hash denylist with TTL = remaining lifetime; refresh-reuse cascade walks `rotated_to`; in-memory ↔ Redis backend flipped by `iot.redis.enabled`. |
+| **3** Device Registry & Lifecycle | ⛔ **NOT STARTED** | No registry CRUD, no lifecycle actions, no credential issue/rotate, no scope replace endpoint. |
+| **4** MQTT + Telemetry + Current State | ⛔ **NOT STARTED** | No MQTT adapter, no ingest funnel (HTTP or MQTT), no `sensor_latest` upserts in the live path, no history/current-state APIs. |
+| **5** Heartbeat / Health / Connectivity | ⛔ **NOT STARTED** | No heartbeat ingest, no LWT consumption, no `device_health` upsert path, no health/connectivity APIs. |
+| **6** Commands + Ack + Timeout Sweeper | ⛔ **NOT STARTED** | No command issue/ack lifecycle, no MQTT publisher, no timeout sweeper, no `CommandService` interface. |
+| **7** Rule Engine | ⛔ **NOT STARTED** | Schema exists; **no safe evaluator** — the highest-risk security gap (T8 RCE) until a locked-down SpEL/DSL lands with write-time validation. |
+| **8** Alerts | ⛔ **NOT STARTED** | No alert raise / acknowledge / resolve path. |
+| **9** Audit Query API | ⛔ **NOT STARTED** | Write side complete since Phase 1; no `GET /audit-logs` endpoint yet. |
+| **10** Hardening / Observability / Ops / Deploy | ⛔ **NOT STARTED** | No NFR validation, no broker HA, no Redis-backed rate limits in prod, no detection-signal alerting, no device-compromise runbook. |
+
+### Security items already satisfied (do not re-do)
+
+- Argon2id (Spring Security `delegatingPasswordEncoder` default) — `SecurityConfig.java`.
+- Refresh-token server-side hashed store with **rotation + reuse cascade + descendant revoke** — `AuthServiceImpl.java`.
+- One `OAuth2TokenValidator<Jwt>` chained into the decoder so **both user *and* device tokens** flow through the denylist — `DenylistJwtValidator.java`, `SecurityConfig.java`.
+- Random `jti` on every access token + SHA-256 refresh hashes with **TTL = remaining lifetime** in `InMemoryTokenDenylist` / `RedisTokenDenylist`.
+- Rate-limit filter (User 100/min, Device 300/min, Auth 20/min, Telemetry 600/min configurable) — `RateLimitFilter.java`. Backend is in-memory now; Redis swap deferred to Phase 10.
+- Security headers (HSTS 2y, X-Content-Type-Options, X-Frame-Options deny, CSP `default-src 'self'`) — `SecurityConfig.java`.
+- Append-only `audit_logs` partitioned writer in a separate `REQUIRES_NEW` transaction — `AuditServiceImpl.java`.
+- `IdempotencyService` (24h replay store) ready for Phase 3 credential/issue endpoints and Phase 6 command issue.
+
+### Outstanding security gaps that block "production-ready"
+
+Ordered by safety-blast-radius (worst first); each maps to its phase below.
+
+1. **No telemetry ingest integrity (T1 spoofing).** No payload-identity re-validation, no server-side received-timestamp / stale-replay detection, no per-device ingest rate limit. → **Phase 4**.
+2. **No command safety loop (T2 tamper / T3 suppression).** No ack correlation, no timeout sweeper, no command-suppression detection signal, no documented fail-safe actuator default. → **Phase 6** + **Phase 10**.
+3. **No safe rule evaluator (T8 RCE).** `rules.condition` / `rules.action` are TEXT with nothing reading them — but the moment Phase 7 wires evaluation, it **must** use locked-down SpEL or a custom DSL with write-time validation. **Never `eval`.** → **Phase 7**.
+4. **No broker authorization.** Per-`device_id` topic ACL enforcement is a broker-side config that depends on Phase 4 topic shape and Phase 10 broker setup. Until then, device identity on the broker is unverified. → **Phase 4** (topics) + **Phase 10** (ACLs).
+5. **No detection / incident response.** Audit records exist but no alerting on auth-failure bursts, refresh-reuse cascade triggers, broker ACL denials, command anomalies, telemetry gaps, or `403`/`429` spikes. → **Phase 10**.
+6. **`AuditEvent` catalog is incomplete.** Today it covers user/auth/partition only. Add device-register/-delete, credential-rotate, command-issue/-execute, rule-change, alert-acknowledge/-resolve, role-grant codes as each phase lands them. → **Phase 3 → 8**.
+7. **Rate-limit counters still in-memory.** Fine for single-instance; **swap to Redis-backed before any horizontal scale-out** so limits are global, not per-instance. → **Phase 10**.
+
+---
+
 ### Non-negotiable invariants (apply in every phase)
 1. **No persistence detail on the wire** — never expose `passwordHash`, `clientSecretHash`, raw partition row PKs (`telemetry.id`), or internal IDs. DTOs only.
 2. **JSON is camelCase; timestamps are ISO-8601 UTC; IDs are opaque strings.**
@@ -55,7 +101,7 @@ flowchart TB
 
 ---
 
-## Phase 0 — Foundation & Scaffolding
+## Phase 0 — Foundation & Scaffolding · ✅ DONE
 
 **Goal:** A running, empty modular monolith with the package seams, build, local infra, and cross-cutting plumbing in place — so every later phase only adds domain logic.
 
@@ -79,9 +125,11 @@ flowchart TB
 
 ---
 
-## Phase 1 — Persistence & Data Model
+## Phase 1 — Persistence & Data Model · ✅ DONE
 
 **Goal:** The complete schema from System Design §4, including time partitioning and retention, plus the cross-cutting **audit writer** that later phases depend on.
+
+> **Status note (2026-06-26):** `V1__init_schema.sql` ships all 13 tables plus the partitioned `telemetry` and `audit_logs`. `PartitionManager` pre-creates and drops partitions on a schedule. The audit writer (`AuditService` / `AuditServiceImpl`) runs in `REQUIRES_NEW`. **Carry-over:** the `AuditEvent` catalog currently lists only user/auth/partition codes — device, credential, command, rule, and alert codes must be added as their owning phases land (see Phases 3 / 6 / 7 / 8).
 
 **Deliverables (what is achieved)**
 - **Migrations for all 13 tables:** `users`, `refresh_tokens`, `devices`, `device_credentials`, `device_scopes`, `device_health`, `sensors`, `telemetry`, `sensor_latest`, `commands`, `rules`, `alerts`, `audit_logs`.
@@ -102,9 +150,11 @@ flowchart TB
 
 ---
 
-## Phase 2 — Security & Identity
+## Phase 2 — Security & Identity · ✅ DONE
 
 **Goal:** Working authentication, RBAC, device tokens, rate limiting, and the user-admin CRUD surface. After this, every later endpoint can be gated correctly.
+
+> **Status note (2026-06-26):** Login / refresh (with rotation) / logout, `/oauth2/token` client-credentials with scope intersection, user CRUD with authority ceiling, rate-limit filter, security headers, and Argon2id are all in place. **Deviation from design:** `V2__add_technician_role.sql` introduced a fifth role `TECHNICIAN`, slotted between `OPERATOR` and `VIEWER` on the privilege ladder — the design doc §7 still lists only 4 roles (`SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`); reconcile by updating either the doc or removing the role. The ladder is the single source of truth in `Role.java`. **Carry-over:** rate-limit counters are in-memory (`InMemoryRateLimiter`); flipping to Redis is Phase 10 work.
 
 **Deliverables (what is achieved)**
 - **Spring Security + OAuth2 Resource Server** validating JWTs; method-level `@PreAuthorize` with role hierarchy `SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`.
@@ -130,9 +180,11 @@ flowchart TB
 
 ---
 
-## Phase 2.5 — Token Revocation & Denylist
+## Phase 2.5 — Token Revocation & Denylist · ✅ DONE
 
 **Goal:** Make revocation of access *and* refresh tokens **instantaneous and enforceable**, closing two gaps the Phase 2 auth flow leaves open: a stateless 1 h access token cannot be killed before it expires, and the `refresh_tokens.revoked` flag alone costs a DB round-trip on every refresh. This phase finalizes the Security & Identity layer (System Design §7 "Token revocation (denylist)") before the registry, ingest, and command paths build on it. *(Added after the §7 security update; slots in right after the now-complete Phase 2.)*
+
+> **Status note (2026-06-26):** Everything in this phase is implemented and verified. `DenylistJwtValidator` is chained into the `NimbusJwtDecoder` and runs ahead of issuer/expiry checks; access-`jti` and refresh-hash key spaces are both honored; TTL = remaining lifetime; the reuse cascade walks `rotated_to` and revokes every descendant. Both `InMemoryTokenDenylist` (default) and `RedisTokenDenylist` (`iot.redis.enabled=true`) exist and share an identical SPI. **Reuse-cascade audit event** (`USER_TOKEN_REUSE_DETECTED`) is already emitted — Phase 10 only needs to wire that into an alerting signal.
 
 **Deliverables (what is achieved)**
 - **Random `jti` on every access token** — minted in the Phase 2 token service so each issued JWT is individually addressable for revocation.
@@ -157,9 +209,11 @@ flowchart TB
 
 ---
 
-## Phase 3 — Device Registry & Lifecycle
+## Phase 3 — Device Registry & Lifecycle · ⛔ NOT STARTED
 
 **Goal:** Full device administration — registry CRUD, lifecycle state machine, credentials (write-once secret), and scopes.
+
+> **Status note (2026-06-26):** Schema and entities exist (`devices`, `device_credentials`, `device_scopes`, including the `previous_secret_hash` / `grace_expires_at` columns); the controllers, services, and lifecycle state machine do not. **Security-critical items to land in this phase:** (a) secret-shown-once on `POST /devices/{id}/credentials` and `:rotate`, with `IdempotencyService` wiring so a retry can't mint duplicate secrets; (b) the rotation **grace window** must be exercised end-to-end (old hash valid until `graceExpiresAt`); (c) `:suspend` / `:decommission` must coordinate with `security/device` to disable tokens and (in Phase 10) revoke broker ACLs — this is the device-compromise containment path; (d) extend `AuditEvent` with `DEVICE_REGISTER`, `DEVICE_UPDATE`, `DEVICE_ACTIVATE`, `DEVICE_SUSPEND`, `DEVICE_DECOMMISSION`, `DEVICE_CREDENTIAL_ISSUE`, `DEVICE_CREDENTIAL_ROTATE`, `DEVICE_SCOPES_REPLACE`.
 
 **Deliverables (what is achieved)**
 - **Registry CRUD:** `GET /v1/devices` (offset paged; filters `zone`, `category`, `deviceType`, `status`), `POST /v1/devices` (`201` + `Location`), `GET /v1/devices/{deviceId}`, `PATCH /v1/devices/{deviceId}` (firmware/zone/type), `GET /v1/devices/{deviceId}/sensors`.
@@ -186,9 +240,11 @@ flowchart TB
 
 ---
 
-## Phase 4 — MQTT Adapter + Telemetry Ingest + Current State
+## Phase 4 — MQTT Adapter + Telemetry Ingest + Current State · ⛔ NOT STARTED
 
 **Goal:** The end-to-end ingest path. Stand up the MQTT client once (reused by Phases 5 & 6), funnel **both MQTT and HTTP** into one Telemetry Service, persist history + current state, and serve the dashboard hot path.
+
+> **Status note (2026-06-26):** Nothing in the `mqtt/` or `telemetry/` modules is wired beyond entities/repositories. This phase carries **the highest-priority unmet security control: ingest-time integrity (T1 spoofing).** Do not ship telemetry endpoints without all three of: payload-identity re-validation (`authenticated device_id == payload.gatewayId`), server-side received-timestamp + implausible-`ts` skew flag (defeats stale-replay), and per-device ingest rate limit (defeats sensor flooding/blinding). The per-gateway topic shape `iot/telemetry/{zone}/{gateway_id}` is the prerequisite for the Phase 10 broker-side ACL — get it right here so Phase 10 is configuration, not refactoring.
 
 **Deliverables (what is achieved)**
 - **MQTT Adapter (`mqtt`):** persistent-session subscriber (`cleanSession=false`) + publisher; MQTTS/TLS; topic↔handler mapping; reconnect with backoff; **Last Will & Testament** registration support for presence; per-device topic ACL alignment (per-gateway telemetry topic `iot/telemetry/{zone}/{gateway_id}` per §6).
@@ -210,9 +266,11 @@ flowchart TB
 
 ---
 
-## Phase 5 — Heartbeat, Health & Connectivity
+## Phase 5 — Heartbeat, Health & Connectivity · ⛔ NOT STARTED
 
 **Goal:** Device liveness — heartbeat ingest over both transports, LWT-driven presence, and the health/connectivity read surface.
+
+> **Status note (2026-06-26):** `device_health` table and entity exist; the ingest path, LWT consumption, and read APIs do not. Identity-matches-body must apply to the HTTP path (`POST /v1/heartbeat`) exactly as it will on telemetry — same control as Phase 4.
 
 **Deliverables (what is achieved)**
 - **Heartbeat ingest:** MQTT `iot/heartbeat/{device_id}` handler + `POST /v1/heartbeat` (device scope `heartbeat:publish`), both upserting the single `device_health` row (not a history table). Authenticated device identity **must match body `deviceId`** → mismatch `403`. Returns `202` (async upsert).
@@ -229,9 +287,11 @@ flowchart TB
 
 ---
 
-## Phase 6 — Commands: Dispatch, Ack & Timeout Sweeper
+## Phase 6 — Commands: Dispatch, Ack & Timeout Sweeper · ⛔ NOT STARTED
 
 **Goal:** The command path with full tracked lifecycle and at-least-once safety.
+
+> **Status note (2026-06-26):** `commands` table and entity exist; the issue / publish / ack / sweeper loop does not. **Security-critical:** the timeout sweeper is the **command-suppression detection signal** (T3) — an attacker dropping MQTT messages must surface as a `TIMEOUT`, not silence; emit an audit event that Phase 10 can subscribe to for alerting. `IdempotencyService` already exists — wire it on `POST /commands` per the spec.
 
 **Deliverables (what is achieved)**
 - **Issue:** `POST /v1/commands` (`OPERATOR`, **`Idempotency-Key` required**) → persist `command` as `PENDING`, publish to `iot/command/{device_id}` (QoS 1), return **`202`** + `Location`. Targeting a non-actuator or `DECOMMISSIONED` device → `422`.
@@ -252,9 +312,11 @@ flowchart TB
 
 ---
 
-## Phase 7 — Rule Engine
+## Phase 7 — Rule Engine · ⛔ NOT STARTED
 
 **Goal:** Safe, async rule evaluation that turns telemetry into commands and alerts off the ingest hot path.
+
+> **Status note (2026-06-26):** `rules` table and entity exist; `condition` and `action` are stored as TEXT but **nothing reads them yet** — which is the only reason there is no current RCE exposure. The moment this phase starts, the locked-down evaluator and write-time validation must land *together*: never `eval`, no reflection, no I/O, validated on `POST/PUT` with `422` listing the offending token. This is the **highest-blast-radius (T8) gap** in the system.
 
 **Deliverables (what is achieved)**
 - **Rule CRUD (API §9):** `GET /v1/rules` (offset paged; filter `enabled`), `POST /v1/rules` (`201`), `GET /v1/rules/{ruleId}`, `PUT` (full replace), `PATCH` (toggle `enabled`/change `priority`), `DELETE` (`204`).
@@ -270,7 +332,7 @@ flowchart TB
 
 ---
 
-## Phase 8 — Alerts
+## Phase 8 — Alerts · ⛔ NOT STARTED
 
 **Goal:** Alert lifecycle driven by rules and operated from the dashboard.
 
@@ -291,9 +353,11 @@ flowchart TB
 
 ---
 
-## Phase 9 — Audit Query API
+## Phase 9 — Audit Query API · ⛔ NOT STARTED
 
 **Goal:** Expose the append-only audit trail that every module has been writing since Phase 1.
+
+> **Status note (2026-06-26):** Write side complete (`AuditServiceImpl`); the read endpoint and its mandatory bounded-window check are not built.
 
 **Deliverables (what is achieved)**
 - `GET /v1/audit-logs` (`ADMIN`, cursor paged; filters `actor`, `actorType`, `event`, `target`, `from`, `to`) over the partitioned `audit_logs` table — **bounded time window required** like telemetry.
@@ -307,9 +371,11 @@ flowchart TB
 
 ---
 
-## Phase 10 — Hardening, Observability, Ops & Deployment
+## Phase 10 — Hardening, Observability, Ops & Deployment · ⛔ NOT STARTED
 
 **Goal:** Make it production-shaped against the non-functional targets and the failure modes in §8.
+
+> **Status note (2026-06-26):** Multiple foundations already exist and only need flipping/wiring here, not re-implementing: rate-limit counters need the Redis backend toggled on for multi-instance; the refresh-reuse cascade already writes `USER_TOKEN_REUSE_DETECTED` audit events that the detection layer can subscribe to; `PartitionManager` already runs the partition pre-create + drop schedule. The new work in this phase is broker HA + per-`device_id` ACL enforcement, MQTT shared-subscription (or leader-elected ingestion) choice, detection-signal alerting, the device-compromise runbook, NFR load testing, and the prod deploy pipeline.
 
 **Deliverables (what is achieved)**
 - **NFR validation:** load test to confirm tens-of-msgs/s ingest, current-state `< 300 ms`, typical history `< 1 s`, command end-to-end `~1–2 s`. Capture results.
