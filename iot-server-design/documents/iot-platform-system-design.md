@@ -376,7 +376,82 @@ From the data spec, normalized. The **one change I recommend** is per-gateway te
 
 ## 7. Security design
 
-Transport, identity, authorization, and audit — the spec lists the requirements; here is how they fit together.
+Transport, identity, authorization, and audit — the spec lists the requirements; here is how they fit together. This section is the security layer of the design: the stance, the trust boundaries, the threat model, and the control set, organized so the highest-impact controls come first.
+
+### Security stance: this is a safety system, not just a data system
+
+The defining characteristic that reorders the usual priorities: a smoke sensor whose telemetry can be spoofed, or an exhaust-fan command that can be forged or suppressed, is a **physical-safety** failure, not a privacy incident. That drives three asymmetric priorities that ripple through everything below:
+
+| Priority | Why it dominates here | Where enforced |
+|---|---|---|
+| **Integrity of telemetry & commands** | A faked "no smoke" reading or a hijacked actuator is a life-safety event — integrity outranks confidentiality for the device plane. | Per-device identity + topic ACLs (broker authorization below); command idempotency & audit (§5.5) |
+| **Availability of the device/command path** | If the broker or command path is down during a fire, the system fails when it matters most. | Broker HA, HTTP fallback, fail-safe actuator defaults (§8 + "Availability as a security property" below) |
+| **Authenticity of every actor** | Both *who* (operator) and *what* (device) must be provably identified before any control action. | OAuth2/JWT (users) + client-credentials (devices) |
+
+Confidentiality still matters (credentials, audit, operator accounts), but for an office-monitoring system the **integrity/availability of the control loop is the crown jewel.**
+
+### Trust boundaries & attack surface
+
+Every arrow crossing a dashed boundary is an authentication + authorization checkpoint. The field network is **physically accessible** (devices sit in ceilings, walls, plant rooms) — treat every device as potentially compromised, which is exactly why per-device identity and per-device topic ACLs (not a shared key) are non-negotiable.
+
+```mermaid
+flowchart TB
+    subgraph UNTRUSTED["⚠️ Untrusted"]
+        ATTACKER["Attacker / rogue device"]
+        OP["Operator browser"]
+    end
+    subgraph FIELD["Field network — physically accessible"]
+        GW["Gateways + Sensors"]
+        ACT["Actuators"]
+    end
+    subgraph EDGE["DMZ / Edge"]
+        LB["TLS term · rate limit"]
+        BROKER[("MQTT Broker<br/>MQTTS · per-device ACL · authN")]
+    end
+    subgraph TRUSTED["Trusted backend zone"]
+        APP["Spring Boot monolith<br/>Spring Security · OAuth2 RS"]
+        DB[("PostgreSQL<br/>secrets hashed · audit")]
+        SECRETS[("Secrets manager / KMS")]
+    end
+    OP -- "HTTPS + Bearer JWT" --> LB
+    LB -- "TLS" --> APP
+    GW -- "MQTTS + client-creds" --> BROKER
+    ACT -- "MQTTS + client-creds" --> BROKER
+    GW -. "HTTPS fallback + device token" .-> LB
+    BROKER -- "authenticated bridge" --> APP
+    APP --> DB
+    APP --> SECRETS
+    ATTACKER -. "spoof / replay / brute force" .-> LB
+    ATTACKER -. "rogue connect / topic abuse" .-> BROKER
+    classDef danger fill:#fee,stroke:#c00;
+    class UNTRUSTED danger;
+```
+
+| Boundary crossed | Threat at the crossing | Control |
+|---|---|---|
+| Operator → Edge | Stolen/forged token, brute force | Bearer JWT validation, short access TTL, auth rate limit, security headers |
+| Device → Broker | Rogue device, identity spoofing, topic abuse | Broker authN (client-creds / cert), per-`device_id` topic ACL |
+| Device → Edge (fallback) | Same device spoofing over HTTP | Device token + scope; `deviceId`-in-body must match token identity |
+| Broker → Backend | Compromised broker injecting messages | Authenticated bridge; backend re-validates payloads & device identity |
+| Backend → DB / Secrets | Lateral movement, secret theft | Network isolation, least-priv DB user, secrets in KMS not source |
+| Field network (physical) | Device theft, firmware extraction, sniffing | TLS on the wire; per-device creds (one compromise ≠ all); decommission flow |
+
+### Threat model (STRIDE, ranked by safety blast radius)
+
+The top three can cause physical harm; they get the strongest controls.
+
+| # | Threat (STRIDE) | Scenario | Impact | Primary control(s) |
+|---|---|---|---|---|
+| **T1** | Spoofing (telemetry) | Compromised device publishes fake "no smoke" / forged reading for another zone | 🔴 Safety: real fire unalerted | Per-gateway topic + broker ACL keyed to `device_id`; backend asserts payload identity == authenticated identity |
+| **T2** | Tampering/Spoofing (command) | Attacker forges or replays an actuator command (`exhaust OFF`) | 🔴 Safety / control | Command publish authZ; idempotent state-sets; ack correlation; audit of every command |
+| **T3** | Denial of Service (control path) | Flood broker/backend so a smoke alert or command never lands | 🔴 Availability when it matters most | Broker HA, rate limits, HTTP fallback, fail-safe actuator defaults |
+| **T4** | Elevation of Privilege | Viewer does admin action; device calls admin API | Unauthorized control | RBAC `@PreAuthorize`; devices restricted to ingest endpoints; role-grant ceiling |
+| **T5** | Information Disclosure | Leak of client secret, password hash, refresh token | Confidentiality; enables T1/T2 | Hashing (Argon2id / SHA-256), secret-shown-once, TLS, no secrets in logs/DTOs |
+| **T6** | Repudiation | Operator/device denies issuing a command/change | Accountability | Append-only audit with actor + IP + correlation id |
+| **T7** | Spoofing (user) | Credential stuffing, brute force, token theft (XSS) | Account takeover | Argon2id, auth rate limit 20/min, short access TTL + revocation |
+| **T8** | Tampering (injection) | SQL injection; malicious rule expression executing code | RCE / data tampering | Parameterized queries (JPA); **no `eval`** — locked-down SpEL/DSL (§5.6) |
+
+**IoT-specific abuse cases** worth calling out: **sensor flooding/blinding** (spam readings to mask a real event → per-device ingest rate limit + gap/anomaly detection); **command suppression** (drop MQTT so `exhaust ON` never lands → ack-timeout sweeper surfaces non-delivery + fail-safe actuator default); **stale-replay** (replay an old "all clear" → server-side ingest timestamp, flag implausible `ts` skew).
 
 ### Users
 - **OAuth2 + JWT.** Access token **1 h**, refresh token **30 d**.
@@ -402,7 +477,14 @@ The DB `revoked` flag on `refresh_tokens` is authoritative; the denylist is a **
 - **Cost & trade-off:** one extra Redis (or in-memory map) lookup per authenticated request — negligible next to the JWT signature check. Worth it to keep logout/compromise truly instantaneous instead of "eventual within 1 h."
 
 ### Broker authorization (the easy-to-miss one)
-The broker must map each device's authenticated identity to **topic ACLs** so device X can only publish/subscribe its own topics. Without this, one compromised device can spoof another zone's telemetry or hijack another device's commands — i.e. fake a "no smoke" reading or send actuator commands. Tie ACLs to the device's identity (JWT or client cert), keyed by `device_id`/`gateway_id` (hence the topic change in §6).
+The broker maps each device's authenticated identity to **per-`device_id` topic ACLs** so device X can only publish/subscribe its own topics. Without this, one compromised device can spoof another zone's telemetry or hijack another device's commands — i.e. fake a "no smoke" reading or send actuator commands. Tie ACLs to the device's identity (client-creds or client cert), keyed by `device_id`/`gateway_id` (hence the topic change in §6). This is the single control that defeats **T1/T2**.
+
+| Device | May publish | May subscribe |
+|---|---|---|
+| Gateway `gw_office1_01` | `iot/telemetry/office_1/gw_office1_01`, `iot/heartbeat/gw_office1_01` | — |
+| Actuator `act_exhaust_1` | `iot/command_ack/act_exhaust_1`, `iot/heartbeat/act_exhaust_1` | `iot/command/act_exhaust_1` |
+
+**Belt and suspenders:** the backend additionally re-validates that the payload's `gatewayId`/`deviceId` equals the authenticated identity — never trust the broker ACL alone, in case the broker itself is compromised.
 
 ### Transport & headers
 - **TLS 1.2+ everywhere**: HTTPS for REST, MQTTS for MQTT. Plain HTTP/MQTT disabled in production.
@@ -412,7 +494,63 @@ The broker must map each device's authenticated identity to **topic ACLs** so de
 Append-only, partitioned `audit_logs`. Record: user login, device registration/deletion, credential rotation, rule changes, command execution, permission/role changes. Each entry carries actor, actor type (USER/DEVICE/SYSTEM), event, target, and source IP.
 
 ### Rate limiting
-Per the spec (User 100/min, Device 300/min, Auth 20/min, Telemetry configurable). Enforce at the API gateway/filter; if you run more than one backend instance, back the counters with **Redis** so limits are global rather than per-instance.
+Per the spec (User 100/min, Device 300/min, Auth 20/min, Telemetry configurable). Enforce at the API gateway/filter; if you run more than one backend instance, back the counters with **Redis** so limits are global rather than per-instance. A spike in `403`/`429` is itself a probing/abuse signal (see Detection below).
+
+### Secrets & credential management
+
+| Secret | Storage | Lifetime | Rotation | Exposure rule |
+|---|---|---|---|---|
+| User password | Argon2id hash in `users` | until changed | user/admin reset | never returned; reset issues no plaintext |
+| Device client secret | hash in `device_credentials` (+ `previous_secret_hash`) | until rotated | `:rotate` with **grace window** | **shown once** at issue/rotate, never again |
+| Refresh token | SHA-256 hash in `refresh_tokens` | 30 d, rotated on use | rotate-on-use | hashed; reuse → revoke cascade (above) |
+| JWT signing key | KMS / secrets manager (not source/env in prod) | scheduled rotation | key-rollover with `kid` | private key never leaves KMS |
+| TLS / DB / broker creds | KMS / secrets manager, injected at runtime | per policy | rotatable | not in source, not in images |
+
+**Rules:** no secret in source control, container images, logs, error responses, or DTOs (the API design's "no `passwordHash`/`clientSecretHash` on the wire" enforces this); one credential **per device** so one compromise is contained, never a shared fleet key; `Idempotency-Key` on credential issue/rotate so a retry can't mint duplicate secrets; secret scanning (gitleaks/trufflehog) in CI.
+
+### Input validation & injection defense
+
+| Surface | Risk | Control |
+|---|---|---|
+| REST bodies/params | Malformed/oversized/invalid input | Bean Validation (`@Valid`), strict DTO binding, `422` listing every failing field |
+| Telemetry payloads (MQTT + HTTP) | Malformed/over-large payloads, type confusion | Schema validation at the single ingest funnel; reject unknown sensor types; `valueNum` XOR `valueBool` |
+| Partitioned reads (telemetry, audit) | Unbounded full-table scan as DoS | **Mandatory** bounded time window + (`sensorId` XOR `zone`); else `422` |
+| DB access | SQL injection | Parameterized queries / JPA bindings only — no string-concatenated SQL |
+| **Rule engine** | **Arbitrary code execution via rule expression** | **Never `eval`.** Locked-down SpEL (read-only, no reflection/I/O) or a purpose-built grammar; validate condition/action **on write** (`422` with offending token) — see §5.6 |
+| Command parameters | Injection into device action | Whitelist actions/params; idempotent state-sets only; reject non-actuator/decommissioned target (`422`) |
+
+The rule engine is the **single most dangerous input sink** — a stored string that gets executed — which is why the §5.6 locked-down evaluator is a security control, not just a robustness one.
+
+### Availability as a security property
+
+Because this is a safety system, availability of the control loop *is* security. The §8 mitigations (broker HA, persistent sessions, HTTP fallback) are load-bearing here. Two safety-specific behaviors:
+- **Fail safe, not fail open** — every degradation (broker down, ack lost, rule queue lost) leaves the system in a *known, observable, safe* state; actuators adopt safe defaults on comms loss rather than silently dropping a safety action.
+- **Command suppression detection** — the ack-timeout sweeper (§5.5) surfaces non-delivery as `TIMEOUT`, so an attacker dropping MQTT messages can't silently suppress `exhaust ON`.
+
+### Detection & incident response
+
+Audit (above) is forensic *after the fact*; **detection** catches things as they happen. Alert on: repeated auth failures / credential stuffing; refresh-token reuse cascade triggered (likely theft); broker ACL denials (a device publishing outside its topics → likely T1); commands from an unexpected actor or to an unexpected target; telemetry gap/anomaly on a safety sensor; `403`/`429` spikes.
+
+**Device compromise** is the most likely real incident (devices are physically exposed). Containment is surgical because of per-device identity: **suspend** (`:suspend` disables credentials) → **decommission** if confirmed (`:decommission` revokes credentials + topic ACLs) → audit-review everything that identity did → cross-check neighbouring sensors for the compromise window. Blast radius is one device, never the fleet.
+
+### Standards mapping (quick reference)
+
+Covers **OWASP API Security Top 10** — broken auth (OAuth2/JWT, Argon2id, revocation), function/object-level authZ (`@PreAuthorize`, role-grant ceiling, devices ingest-only), resource consumption (rate limits, bounded pagination, mandatory time-window scoping), property-level authZ (DTOs omit secrets/PKs), misconfiguration (security headers, TLS, prod hardening) — and the **OWASP IoT Top 10**: weak/hardcoded credentials (per-device hashed secrets), insecure network services (MQTTS + ACLs), insufficient privacy (occupancy data treated as sensitive), insecure transfer/storage (TLS + encryption at rest), device management (registry, lifecycle, decommission).
+
+### Security checklist (build-time gate)
+
+- [ ] TLS 1.2+ enforced on REST and MQTT; plaintext disabled in prod.
+- [ ] Argon2id passwords; per-device client secrets, hashed, shown once, rotatable with grace.
+- [ ] Broker authenticates every connection; per-`device_id` topic ACLs; backend re-validates payload identity.
+- [ ] `@PreAuthorize` on every endpoint; role-grant ceiling; devices ingest-only.
+- [ ] JWT validator chain includes denylist; access `jti` + refresh-hash revocation; refresh rotate-on-use + reuse cascade.
+- [ ] Rule expressions via locked-down evaluator — **no `eval`** — validated on write.
+- [ ] Mandatory bounded time-window + scope on partitioned reads; rate limits (Redis-backed if multi-instance).
+- [ ] Security headers (HSTS, nosniff, frame-deny, CSP); no secrets in source/images/logs/DTOs (KMS instead).
+- [ ] Encryption at rest for DB + encrypted, restore-tested backups.
+- [ ] Append-only audit covering all events above, with actor + IP.
+- [ ] Command idempotency, ack correlation, timeout sweeper, fail-safe actuator defaults.
+- [ ] CI: SCA + SAST + secret scanning gating merges.
 
 ---
 

@@ -38,8 +38,9 @@
 flowchart TB
     P0["Phase 0\nFoundation & Scaffolding"] --> P1["Phase 1\nPersistence & Data Model"]
     P1 --> P2["Phase 2\nSecurity & Identity"]
-    P2 --> P3["Phase 3\nDevice Registry & Lifecycle"]
-    P2 --> P4["Phase 4\nMQTT Adapter + Telemetry + Current State"]
+    P2 --> P25["Phase 2.5\nToken Revocation & Denylist"]
+    P25 --> P3["Phase 3\nDevice Registry & Lifecycle"]
+    P25 --> P4["Phase 4\nMQTT Adapter + Telemetry + Current State"]
     P3 --> P4
     P4 --> P5["Phase 5\nHeartbeat / Health / Connectivity"]
     P4 --> P6["Phase 6\nCommands + Ack + Timeout Sweeper"]
@@ -129,6 +130,33 @@ flowchart TB
 
 ---
 
+## Phase 2.5 — Token Revocation & Denylist
+
+**Goal:** Make revocation of access *and* refresh tokens **instantaneous and enforceable**, closing two gaps the Phase 2 auth flow leaves open: a stateless 1 h access token cannot be killed before it expires, and the `refresh_tokens.revoked` flag alone costs a DB round-trip on every refresh. This phase finalizes the Security & Identity layer (System Design §7 "Token revocation (denylist)") before the registry, ingest, and command paths build on it. *(Added after the §7 security update; slots in right after the now-complete Phase 2.)*
+
+**Deliverables (what is achieved)**
+- **Random `jti` on every access token** — minted in the Phase 2 token service so each issued JWT is individually addressable for revocation.
+- **`refresh_tokens.rotated_to` column (migration)** — self-referential pointer to the token a refresh was rotated into, enabling the reuse cascade to walk the chain. *(System Design §7 references `rotated_to`; the §4 ER diagram still shows only `revoked` — this migration reconciles them.)*
+- **`TokenDenylist` SPI with two interchangeable backends (§7):**
+  - `InMemoryTokenDenylist` (default, `iot.redis.enabled=false`) for single-instance and tests.
+  - `RedisTokenDenylist` (`iot.redis.enabled=true`) so every instance sees the same denials when running >1 instance. Identical interface; switching is a config flip.
+  - **TTL = remaining lifetime of the underlying token** — entries auto-expire when the token would have anyway, so the store self-prunes and never outlives what it blocks.
+- **One validator gates every JWT:** a custom `OAuth2TokenValidator<Jwt>` chained into the `NimbusJwtDecoder`, so **both user and device** tokens pass through it. A token whose `jti` is denylisted fails verification **ahead of** issuer/expiry checks.
+- **Two key spaces, two purposes (§7):**
+  - **Access `jti`** — blocks an issued JWT before its 1 h natural expiry; added on logout (when the client presents its access token) and on demand for forced sign-out.
+  - **Refresh hash** (SHA-256 of the raw token) — short-circuits the refresh path before any DB lookup and serves as the fast-deny entry for any revoked/rotated token.
+- **Refresh-reuse cascade (§7):** presenting a revoked/rotated refresh token (likely compromise) walks `rotated_to` and denylists **every descendant's hash**, returns `401` `errors/token-revoked`, and emits a **detection signal** (consumed in Phase 10).
+- **Logout & refresh upgraded:** logout now additionally denylists the presented access `jti` **and** the refresh hash (truly instantaneous, not "eventual within 1 h"); refresh checks the denylist before the DB. The DB `revoked` flag remains authoritative; the denylist is the fast-deny layer in front of it.
+- Audit on forced revocation and reuse-cascade trigger.
+
+**Endpoints:** no new REST operations — augments the existing `/auth/login` (adds `jti`), `/auth/refresh` (denylist + cascade), `/auth/logout` (denylist access + refresh), and the JWT validation path for **every** authenticated endpoint.
+**Modules:** `security/user`, `security/device` (shared validator path), `common` (denylist SPI), `audit` (consumed).
+**Load-bearing decisions to honor:** denylist as a fast-deny layer in front of the authoritative DB `revoked` flag; one validator for user *and* device JWTs; TTL = remaining token lifetime; reuse cascade via `rotated_to`; pluggable in-memory/Redis backend switched by config (§7).
+**DoD:** a logged-out access token is rejected immediately (not after 1 h); a denylisted `jti` fails JWT validation for both user and device tokens; presenting a rotated-out refresh token triggers the cascade, revokes all descendants, and returns `401` `errors/token-revoked`; flipping `iot.redis.enabled` swaps backends with identical behavior; denylist entries expire with their underlying token.
+**Tests:** access-token denylist on logout → immediate `401`; `jti` validator applies to user **and** device tokens; refresh-reuse cascade revokes the descendant chain; TTL expiry of entries; in-memory vs Redis backend parity (Testcontainers Redis); validator ordering (denylist before issuer/expiry).
+
+---
+
 ## Phase 3 — Device Registry & Lifecycle
 
 **Goal:** Full device administration — registry CRUD, lifecycle state machine, credentials (write-once secret), and scopes.
@@ -166,6 +194,7 @@ flowchart TB
 - **MQTT Adapter (`mqtt`):** persistent-session subscriber (`cleanSession=false`) + publisher; MQTTS/TLS; topic↔handler mapping; reconnect with backoff; **Last Will & Testament** registration support for presence; per-device topic ACL alignment (per-gateway telemetry topic `iot/telemetry/{zone}/{gateway_id}` per §6).
 - **One ingestion funnel (§5.4):** the MQTT telemetry handler and `POST /v1/telemetry` call the **same `TelemetryService`** — validation, persistence, state update, and rule hand-off live in exactly one place.
   - `POST /v1/telemetry` (device scope `telemetry:publish`): synchronous shape validation (`422` on bad shape), then **`202`**; persistence + rule hand-off async. Batch of readings; each item numeric **xor** boolean.
+- **Ingest-time integrity controls (§7 IoT abuse cases):** stamp a **server-side received timestamp** and flag implausible device-`ts` skew (defeats **stale-replay** of an old "all clear"); **per-device ingest rate limit** plus a gap/anomaly-detection seam to surface **sensor flooding/blinding**; the backend **re-validates that payload `gatewayId`/`deviceId` equals the authenticated identity** — never trust the broker ACL alone (belt-and-suspenders for T1/T2).
 - **Persistence:** append rows to the current `telemetry` partition; **upsert `sensor_latest`** per sensor.
 - **Rule hand-off seam:** persist first, then enqueue a reading event to a bounded in-process queue (consumed in Phase 7). Non-blocking — the MQTT callback never waits on rules.
 - **History query:** `GET /v1/telemetry` (cursor paged) — **exactly one of `sensorId` or `zone` required** + bounded time window; missing/oversized window → `422`. Maps to the `(sensor_id, ts DESC)`/`(zone, ts DESC)` indexes.
@@ -175,9 +204,9 @@ flowchart TB
 **Endpoints:** `POST /v1/telemetry`, `GET /v1/telemetry`, `GET /v1/current-state`, `GET /v1/sensors/{sensorId}/latest`, `GET /v1/connectivity`.
 **Topics:** `iot/telemetry/{zone}/{gateway_id}` (subscribe), LWT `iot/status/{device_id}` plumbing.
 **Modules:** `mqtt`, `telemetry`, `api`, `health` (read side for connectivity/sensor_latest).
-**Load-bearing decisions to honor:** one funnel for both transports (§5.4); persist-before-evaluate + async rule hand-off (§5.6); current/history split (§5.3); persistent MQTT session (§8); mandatory bounded window on partitioned reads (API §5); `202` for ingest.
-**DoD:** a reading published over MQTT and the same reading POSTed over HTTP both land in `telemetry` + update `sensor_latest`; the dashboard reads current state in the hot path without touching partitions; history query rejects unbounded windows with `422`; broker restart doesn't lose QoS-1 messages (persistent session).
-**Tests (Testcontainers Postgres + MQTT broker):** MQTT→DB end-to-end; HTTP fallback→same service; numeric-xor-boolean validation; unbounded-window `422`; current-state from `sensor_latest`; reconnect/persistent-session redelivery.
+**Load-bearing decisions to honor:** one funnel for both transports (§5.4); persist-before-evaluate + async rule hand-off (§5.6); current/history split (§5.3); persistent MQTT session (§8); mandatory bounded window on partitioned reads (API §5); `202` for ingest; **ingest-time integrity — server-side timestamp/stale-replay flag, per-device ingest rate limit, payload-identity re-validation (§7)**.
+**DoD:** a reading published over MQTT and the same reading POSTed over HTTP both land in `telemetry` + update `sensor_latest`; the dashboard reads current state in the hot path without touching partitions; history query rejects unbounded windows with `422`; broker restart doesn't lose QoS-1 messages (persistent session); a reading whose payload identity ≠ authenticated identity is rejected, and an implausible-`ts` (stale-replay) reading is flagged.
+**Tests (Testcontainers Postgres + MQTT broker):** MQTT→DB end-to-end; HTTP fallback→same service; numeric-xor-boolean validation; unbounded-window `422`; current-state from `sensor_latest`; reconnect/persistent-session redelivery; payload-identity-mismatch rejected; stale/implausible-`ts` flagged; per-device ingest rate limit trips.
 
 ---
 
@@ -209,6 +238,7 @@ flowchart TB
 - **Ack correlation:** subscribe `iot/command_ack/{device_id}`; correlate by `commandId`; advance `PENDING → RECEIVED → SUCCESS/FAILED`, stamping `received_at`/`executed_at`.
 - **Idempotent state-sets:** actions are `SET status=ON` style (not `TOGGLE`); document the device-side dedupe-on-`commandId` contract so QoS-1 redelivery is harmless (§5.5).
 - **Timeout sweeper:** scheduled job marks `PENDING/RECEIVED` commands `TIMEOUT` after N seconds without ack (config-driven).
+- **Command-suppression & fail-safe (§7 "Availability as a security property"):** a `TIMEOUT` is emitted as a **detection signal** (consumed in Phase 10) so an attacker dropping MQTT messages can't silently suppress `exhaust ON`; document the **fail-safe actuator default** contract — devices adopt a known safe state on comms loss rather than dropping a safety action.
 - **Status reads:** `GET /v1/commands` (cursor paged; filters `targetId`, `status`, `from`, `to`), `GET /v1/commands/{commandId}`. **No cancel/delete** endpoint — issue the inverse state-set instead.
 - **Internal issue interface:** a published `CommandService` interface so the rule engine (Phase 7) can issue commands without touching the controller or repository.
 - Audit on command issue + execution.
@@ -288,14 +318,15 @@ flowchart TB
 - **Partitioning + retention automation:** scheduled partition pre-creation and retention drop running in `prod`; alerting if a partition is missing.
 - **Broker authorization:** per-device topic ACLs mapped from device identity (`device_id`/`gateway_id`), tied to credentials/scopes; verify a device cannot publish/subscribe another's topics (§7).
 - **Observability:** structured logging, metrics (ingest rate, queue depth, command timeouts, partition size), liveness/readiness probes, dashboards/alerts.
-- **Security review:** TLS 1.2+ everywhere, headers, secret handling (write-once, hashed), brute-force limits, dependency scan; confirm no internal IDs/hashes leak on any DTO.
+- **Detection & incident response (§7):** alerting on repeated auth failures / credential stuffing, **refresh-token reuse-cascade triggered** (likely theft — signal from Phase 2.5), **broker ACL denials** (device publishing outside its topics → likely T1), commands from an **unexpected actor/target**, **telemetry gap/anomaly on a safety sensor**, and `403`/`429` spikes. **Device-compromise containment runbook:** suspend (`:suspend`) → decommission (`:decommission`) if confirmed → audit-review everything that identity did → cross-check neighbouring sensors for the compromise window (blast radius = one device, never the fleet).
+- **Security review:** TLS 1.2+ everywhere, headers, secret handling (write-once, hashed), brute-force limits, dependency scan; confirm no internal IDs/hashes leak on any DTO. Gate against the **§7 build-time security checklist** and confirm the **standards mapping** (OWASP API Security Top 10 + OWASP IoT Top 10) is satisfied.
 - **Deployment:** containerized build, prod profile, config/secret management, DB backup/restore + partition-aware retention runbook, broker runbook, rollback procedure.
 - **Docs:** finalized OpenAPI, deprecation/versioning policy (`Deprecation`/`Sunset` headers), operational runbooks.
 
 **Modules:** all (cross-cutting); `security`, `mqtt`, `common`, ops/deploy.
-**Load-bearing decisions to honor:** broker as #1 SPOF mitigation; persistent-session/no-loss-on-reconnect; partition+retention automation; Redis-backed global limits; broker-side per-device ACLs (§7, §8).
-**DoD:** NFR targets met under load; broker restart loses no QoS-1 data; retention/partition jobs run unattended in prod; per-device ACLs enforced; no sensitive field leaks; deploy + rollback rehearsed.
-**Tests:** load/perf suite vs targets; chaos test (broker down → fallback + recovery); ACL negative tests; partition/retention job tests; security scan; end-to-end smoke across all flows.
+**Load-bearing decisions to honor:** broker as #1 SPOF mitigation; persistent-session/no-loss-on-reconnect; partition+retention automation; Redis-backed global limits; broker-side per-device ACLs (§7, §8); **detection & incident response + fail-safe-not-fail-open (§7)**.
+**DoD:** NFR targets met under load; broker restart loses no QoS-1 data; retention/partition jobs run unattended in prod; per-device ACLs enforced; no sensitive field leaks; **detection alerts fire on the §7 signals (auth-failure burst, reuse cascade, ACL denial, command anomaly, sensor gap, `403`/`429` spike); device-compromise runbook rehearsed**; §7 security checklist green; deploy + rollback rehearsed.
+**Tests:** load/perf suite vs targets; chaos test (broker down → fallback + recovery); ACL negative tests; partition/retention job tests; security scan; **detection-signal tests (each §7 alert condition triggers)**; end-to-end smoke across all flows.
 
 ---
 
@@ -368,6 +399,8 @@ All 44 OpenAPI operations are accounted for.
 | Postgres + monthly partitioning + drop-don't-delete retention (§5.2) | 1, 10 |
 | Current-state vs history split; telemetry no-FK; per-device health row (§4, §5.3) | 1, 4, 5 |
 | Refresh-token server-side hashed + revocation; Argon2id (§7) | 2 |
+| Token denylist: instant revocation (access `jti` + refresh-hash), one validator for user+device, TTL = remaining lifetime, pluggable in-memory/Redis backend (§7) | 2.5 |
+| Refresh-reuse cascade via `rotated_to` → revoke descendants + detection signal (§7) | 2.5 |
 | Device client-credentials + scope intersection (§7) | 2, 3 |
 | Rate limiting at filter, Redis-ready (§7) | 2, 10 |
 | Named lifecycle actions with side effects (API §4) | 3 |
@@ -383,6 +416,9 @@ All 44 OpenAPI operations are accounted for.
 | Append-only audit, read-only API (§7, API §10) | 1 (writer), 9 (query) |
 | Broker SPOF mitigation / HA / shared-subscriptions scaling (§8) | 10 |
 | Per-device broker topic ACLs (§7) | 4 (topic shape), 10 (enforcement) |
+| Ingest-time integrity: stale-replay timestamp check, per-device ingest rate limit, payload-identity re-validation (§7 abuse cases) | 4 |
+| Command-suppression detection + fail-safe actuator defaults (§7) | 6, 10 |
+| Detection & incident response; device-compromise containment runbook; OWASP API/IoT mapping; security-checklist gate (§7) | 10 |
 | RFC 9457 errors, camelCase, URI versioning, idempotency keys (API §1) | 0 |
 
 ---
