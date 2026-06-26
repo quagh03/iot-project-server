@@ -41,3 +41,7 @@ out/
 
 ## design docs (not part of build) ##
 iot-server-design/
+
+## mosquitto runtime state (config is tracked, data/log are not) ##
+src/main/docker/compose/mosquitto/data/
+src/main/docker/compose/mosquitto/log/
