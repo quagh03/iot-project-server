@@ -48,10 +48,13 @@ public class DeviceTokenController {
         DeviceTokenService.DeviceTokenResult result =
                 deviceTokenService.mint(clientId, clientSecret, requested);
 
-        return ResponseEntity.ok(new DeviceTokenResponse(
-                result.accessToken(),
-                "Bearer",
-                result.expiresInSeconds(),
-                String.join(" ", result.grantedScopes())));
+        DeviceTokenResponse tokenResponse = DeviceTokenResponse.builder()
+            .accessToken(result.accessToken())
+            .tokenType("Bearer")
+            .expiresIn(result.expiresInSeconds())
+            .scope(String.join(" ", result.grantedScopes()))
+            .build();
+
+        return ResponseEntity.ok(tokenResponse);
     }
 }
