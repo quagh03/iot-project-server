@@ -38,3 +38,6 @@ out/
 
 ## codegraph ##
 .codegraph/
+
+## design docs (not part of build) ##
+iot-server-design/
