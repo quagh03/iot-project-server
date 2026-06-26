@@ -1,0 +1,36 @@
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:20}
+  jpa:
+    show-sql: false
+
+server:
+  forward-headers-strategy: framework
+  error:
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never
+    include-exception: false
+
+logging:
+  level:
+    root: INFO
+    com.huylq.iotprojectserver: INFO
+
+iot:
+  security:
+    jwt:
+      secret: ${JWT_SECRET}
+  mqtt:
+    broker-url: ${MQTT_BROKER_URL}
+    client-id: ${MQTT_CLIENT_ID}
+    username: ${MQTT_USERNAME:}
+    password: ${MQTT_PASSWORD:}
+  redis:
+    enabled: true
+    host: ${REDIS_HOST}
+    port: ${REDIS_PORT:6379}

@@ -1,12 +1,11 @@
 spring:
   application:
     name: iot-project-server
-  datasource:
-    url: jdbc:postgresql://localhost:5432/iot
-    username: postgres
-    password: postgres
-    hikari:
-      maximum-pool-size: 10
+  profiles:
+    default: local
+  jackson:
+    default-property-inclusion: NON_NULL
+    time-zone: UTC
   flyway:
     enabled: true
     locations: classpath:db/migration
@@ -16,15 +15,44 @@ spring:
     open-in-view: false
     properties:
       hibernate:
-        format_sql: true
-        generate_statistics: true
-    show-sql: true
-  devtools:
-    remote:
-      restart:
-        enabled: true
+        jdbc:
+          time_zone: UTC
+
 management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,info
+
+springdoc:
+  api-docs:
+    path: /v1/api-docs
+  swagger-ui:
+    path: /v1/swagger-ui.html
+
+iot:
+  rate-limit:
+    enabled: true
+    user-per-minute: 100
+    device-per-minute: 300
+    auth-per-minute: 20
+    telemetry-per-minute: 600
+  redis:
+    enabled: false
+  security:
+    jwt:
+      issuer: iot-platform
+      access-token-ttl: 1h
+      refresh-token-ttl: 30d
+      device-token-ttl: 1h
+  idempotency:
+    ttl-hours: 24
+  pagination:
+    default-page-size: 50
+    max-page-size: 200
+  partitioning:
+    tables:
+      - telemetry
+      - audit_logs
+    retention-months: 0   # 0 = retention drop disabled (Open Question #1)
+    dry-run: true         # log dropped partitions instead of actually dropping

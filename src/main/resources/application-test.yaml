@@ -1,0 +1,28 @@
+spring:
+  datasource:
+    url: jdbc:tc:postgresql:17:///iot_test?stringtype=unspecified
+    driver-class-name: org.testcontainers.jdbc.ContainerDatabaseDriver
+    username: test
+    password: test
+  jpa:
+    show-sql: false
+  flyway:
+    enabled: true
+
+logging:
+  level:
+    org.hibernate.SQL: WARN
+
+iot:
+  rate-limit:
+    enabled: false
+  security:
+    jwt:
+      secret: test-only-secret-for-integration-tests-32b
+      access-token-ttl: 1m
+      refresh-token-ttl: 5m
+  mqtt:
+    broker-url: tcp://localhost:1883
+    client-id: iot-server-test
+  redis:
+    enabled: false

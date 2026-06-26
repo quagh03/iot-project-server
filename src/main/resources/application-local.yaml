@@ -1,0 +1,33 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/iot?stringtype=unspecified
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 10
+  jpa:
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+  devtools:
+    restart:
+      enabled: true
+
+logging:
+  level:
+    com.huylq.iotprojectserver: DEBUG
+    org.hibernate.SQL: DEBUG
+
+iot:
+  security:
+    jwt:
+      # Dev-only HS256 secret — minimum 32 bytes. Replaced via env in prod.
+      secret: ${JWT_SECRET:dev-only-secret-please-change-me-now}
+  mqtt:
+    broker-url: tcp://localhost:1883
+    client-id: iot-server-local
+  redis:
+    enabled: false
+    host: localhost
+    port: 6379
