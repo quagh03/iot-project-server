@@ -2,6 +2,7 @@ package com.huylq.iotprojectserver.security.user;
 
 import com.huylq.iotprojectserver.security.Role;
 
+import com.huylq.iotprojectserver.audit.AuditEvent;
 import com.huylq.iotprojectserver.audit.AuditService;
 import com.huylq.iotprojectserver.common.error.ApiException;
 import lombok.RequiredArgsConstructor;
@@ -40,7 +41,7 @@ class UserServiceImpl implements UserService {
                 .status(User.Status.ACTIVE)
                 .build();
         User saved = userRepo.save(user);
-        audit.user(callerId, "user.create", saved.getId().toString(),
+        audit.user(callerId, AuditEvent.USER_CREATE, saved.getId().toString(),
                 Map.of("username", username, "role", role.name()), ip);
         return saved;
     }
@@ -83,7 +84,7 @@ class UserServiceImpl implements UserService {
                 refreshRepo.revokeAllForUser(user.getId());
             }
         }
-        audit.user(callerId, "user.update", id.toString(),
+        audit.user(callerId, AuditEvent.USER_UPDATE, id.toString(),
                 Map.of("newRole", String.valueOf(newRole),
                        "newStatus", String.valueOf(newStatus)), ip);
         return user;
@@ -96,7 +97,7 @@ class UserServiceImpl implements UserService {
         requireAuthorityToGrant(callerRole, user.getRole()); // need authority over the target's level
         user.setStatus(User.Status.DISABLED);
         refreshRepo.revokeAllForUser(user.getId());
-        audit.user(callerId, "user.delete", id.toString(), null, ip);
+        audit.user(callerId, AuditEvent.USER_DELETE, id.toString(), null, ip);
     }
 
     @Override
@@ -109,7 +110,7 @@ class UserServiceImpl implements UserService {
         }
         user.setPasswordHash(passwordEncoder.encode(newPassword));
         refreshRepo.revokeAllForUser(user.getId());
-        audit.user(callerId, "user.password-reset", id.toString(), null, ip);
+        audit.user(callerId, AuditEvent.USER_PASSWORD_RESET, id.toString(), null, ip);
     }
 
     /**

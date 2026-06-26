@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.security.user;
 
+import com.huylq.iotprojectserver.audit.AuditEvent;
 import com.huylq.iotprojectserver.audit.AuditLog;
 import com.huylq.iotprojectserver.audit.AuditService;
 import com.huylq.iotprojectserver.common.denylist.TokenDenylist;
@@ -44,12 +45,12 @@ class AuthServiceImpl implements AuthService {
                 || !passwordEncoder.matches(password, maybeUser.get().getPasswordHash())) {
             // Identical 401 for all failure modes — never leak which side failed.
             audit.append(username, AuditLog.ActorType.USER,
-                    "user.login.failed", null, null, ip);
+                    AuditEvent.USER_LOGIN_FAILED, null, null, ip);
             throw new ApiException(ErrorType.UNAUTHENTICATED, HttpStatus.UNAUTHORIZED, "Invalid credentials");
         }
         User user = maybeUser.get();
         IssuedTokens tokens = issueTokens(user);
-        audit.user(user.getId().toString(), "user.login", username, null, ip);
+        audit.user(user.getId().toString(), AuditEvent.USER_LOGIN, username, null, ip);
         return tokens;
     }
 
@@ -74,7 +75,7 @@ class AuthServiceImpl implements AuthService {
             // Reuse of a revoked token signals a potentially compromised refresh chain.
             // Cascade-revoke + denylist the chain so an attacker holding any of them loses it too.
             cascadeRevoke(row);
-            audit.user(row.getUser().getId().toString(), "user.token.reuse-detected",
+            audit.user(row.getUser().getId().toString(), AuditEvent.USER_TOKEN_REUSE_DETECTED,
                     null, Map.of("tokenId", row.getId().toString()), ip);
             throw ApiException.tokenRevoked("Refresh token already used");
         }
@@ -91,7 +92,7 @@ class AuthServiceImpl implements AuthService {
         // The just-rotated token must never be replayed.
         denylist.blacklistRefreshHash(row.getTokenHash(), remainingLifetime(row.getExpiresAt()));
 
-        audit.user(user.getId().toString(), "user.token.rotated",
+        audit.user(user.getId().toString(), AuditEvent.USER_TOKEN_ROTATED,
                 null, Map.of("oldTokenId", row.getId().toString(),
                              "newTokenId", newRow.getId().toString()), ip);
         return issued;
@@ -106,7 +107,7 @@ class AuthServiceImpl implements AuthService {
             refreshRepo.findByTokenHash(hash).ifPresent(row -> {
                 row.setRevoked(true);
                 denylist.blacklistRefreshHash(hash, remainingLifetime(row.getExpiresAt()));
-                audit.user(row.getUser().getId().toString(), "user.logout",
+                audit.user(row.getUser().getId().toString(), AuditEvent.USER_LOGOUT,
                         null, Map.of("tokenId", row.getId().toString()), ip);
             });
         }

@@ -20,13 +20,13 @@ class AuditServiceImpl implements AuditService {
      */
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void append(String actor, AuditLog.ActorType actorType, String event,
+    public void append(String actor, AuditLog.ActorType actorType, AuditEvent event,
                        String target, Map<String, Object> detail, String ip) {
         AuditLog row = AuditLog.builder()
                 .ts(Clocks.nowUtc())
                 .actor(actor)
                 .actorType(actorType)
-                .event(event)
+                .event(event.code())
                 .target(target)
                 .detail(detail)
                 .ip(ip)
