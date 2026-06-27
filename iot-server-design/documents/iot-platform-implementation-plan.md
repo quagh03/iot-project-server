@@ -56,6 +56,15 @@ Ordered by safety-blast-radius (worst first); each maps to its phase below.
 5. **No detection / incident response.** Audit records exist but no alerting on auth-failure bursts, refresh-reuse cascade triggers, broker ACL denials, command anomalies, telemetry gaps, or `403`/`429` spikes. → **Phase 10**.
 6. **`AuditEvent` catalog is incomplete.** Today it covers user/auth/partition only. Add device-register/-delete, credential-rotate, command-issue/-execute, rule-change, alert-acknowledge/-resolve, role-grant codes as each phase lands them. → **Phase 3 → 8**.
 7. **Rate-limit counters still in-memory.** Fine for single-instance; **swap to Redis-backed before any horizontal scale-out** so limits are global, not per-instance. → **Phase 10**.
+8. **JWT signing key is a single shared HMAC in `JWT_SECRET` env var.** §7 secrets table mandates KMS-managed signing key, **scheduled rotation**, and **key-rollover with a `kid` claim** so an emit/verify mix during rollover stays valid. Today there is no `kid`, no JWKSet, no rotation procedure. → **Phase 10** (with Phase 2 carry-over flag).
+9. **No DB encryption at rest, no encrypted-and-restore-tested backups.** §7 checklist line 9; nothing in `application-prod.yaml` or Compose configures this. → **Phase 10**.
+10. **No CI security gates (SCA + SAST + secret scanning).** §7 calls for gitleaks/trufflehog + SAST gating merges. Current pipeline (per Phase 0 status) is build + test + style only. → **Phase 10**.
+11. **No least-privilege DB user and no network-isolation contract.** §7 trust-boundary control for `Backend → DB / Secrets`; the Compose stack runs as a single privileged role. → **Phase 10**.
+12. **TLS / DB / broker credentials still come from env files in prod.** §7 secrets table requires KMS injection at runtime; reconcile alongside item 8. → **Phase 10**.
+13. **Command-parameter whitelist not explicit.** §7 input-validation table requires whitelist of allowed actions/params and a `422` for non-actuator/decommissioned targets; Phase 6 covers idempotent state-sets but the whitelist itself is implicit. → **Phase 6**.
+14. **Telemetry ingest does not yet reject unknown sensor types.** §7 input-validation table requires it at the single ingest funnel; today the funnel doesn't exist. → **Phase 4**.
+15. **Device JWTs must explicitly 403 on user/admin endpoints (T4 "devices ingest-only").** Today `@PreAuthorize` only covers `/users`; once Phase 3+ endpoints land, every admin/operator endpoint must reject device-issued tokens (e.g. by requiring `ROLE_USER` *and* checking no device scope, or by gating on `actorType=USER`). → **Phases 3 → 8** + checklist gate in Phase 10.
+16. **Privacy: occupancy data is sensitive but not labeled or access-controlled as such.** §7 OWASP IoT mapping treats presence/occupancy readings as sensitive. No data-classification or retention/redaction policy for these readings exists. → **Phase 10** policy + targeted controls earlier if a `VIEWER` role gets broad telemetry access.
 
 ---
 
@@ -154,7 +163,7 @@ flowchart TB
 
 **Goal:** Working authentication, RBAC, device tokens, rate limiting, and the user-admin CRUD surface. After this, every later endpoint can be gated correctly.
 
-> **Status note (2026-06-26):** Login / refresh (with rotation) / logout, `/oauth2/token` client-credentials with scope intersection, user CRUD with authority ceiling, rate-limit filter, security headers, and Argon2id are all in place. **Deviation from design:** `V2__add_technician_role.sql` introduced a fifth role `TECHNICIAN`, slotted between `OPERATOR` and `VIEWER` on the privilege ladder — the design doc §7 still lists only 4 roles (`SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`); reconcile by updating either the doc or removing the role. The ladder is the single source of truth in `Role.java`. **Carry-over:** rate-limit counters are in-memory (`InMemoryRateLimiter`); flipping to Redis is Phase 10 work.
+> **Status note:** Login / refresh (with rotation) / logout, `/oauth2/token` client-credentials with scope intersection, user CRUD with authority ceiling, rate-limit filter, security headers, and Argon2id are all in place. **Deviation from design:** `V2__add_technician_role.sql` introduced a fifth role `TECHNICIAN`, slotted between `OPERATOR` and `VIEWER` on the privilege ladder — the design doc §7 still lists only 4 roles (`SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`); reconcile by updating either the doc or removing the role. The ladder is the single source of truth in `Role.java`. **Carry-overs to Phase 10:** (a) rate-limit counters are in-memory (`InMemoryRateLimiter`); flipping to Redis. (b) JWT signing key is a single shared HMAC sourced from the `JWT_SECRET` env var — §7 mandates KMS-managed signing key with **scheduled rotation and a `kid` claim for key-rollover**; this entails moving to asymmetric keys (e.g. RSA/ECDSA), publishing a JWKSet, and adding `kid` to every issued token + the validator chain. (c) Every endpoint added in Phases 3 → 8 must enforce **devices-ingest-only** (T4) — operator/admin endpoints must reject device JWTs, not just under-privileged users.
 
 **Deliverables (what is achieved)**
 - **Spring Security + OAuth2 Resource Server** validating JWTs; method-level `@PreAuthorize` with role hierarchy `SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`.
@@ -249,7 +258,7 @@ flowchart TB
 **Deliverables (what is achieved)**
 - **MQTT Adapter (`mqtt`):** persistent-session subscriber (`cleanSession=false`) + publisher; MQTTS/TLS; topic↔handler mapping; reconnect with backoff; **Last Will & Testament** registration support for presence; per-device topic ACL alignment (per-gateway telemetry topic `iot/telemetry/{zone}/{gateway_id}` per §6).
 - **One ingestion funnel (§5.4):** the MQTT telemetry handler and `POST /v1/telemetry` call the **same `TelemetryService`** — validation, persistence, state update, and rule hand-off live in exactly one place.
-  - `POST /v1/telemetry` (device scope `telemetry:publish`): synchronous shape validation (`422` on bad shape), then **`202`**; persistence + rule hand-off async. Batch of readings; each item numeric **xor** boolean.
+  - `POST /v1/telemetry` (device scope `telemetry:publish`): synchronous shape validation (`422` on bad shape) — including **rejecting unknown `sensorType` values** against a registry-derived whitelist and enforcing `valueNum` XOR `valueBool` — then **`202`**; persistence + rule hand-off async. Batch of readings.
 - **Ingest-time integrity controls (§7 IoT abuse cases):** stamp a **server-side received timestamp** and flag implausible device-`ts` skew (defeats **stale-replay** of an old "all clear"); **per-device ingest rate limit** plus a gap/anomaly-detection seam to surface **sensor flooding/blinding**; the backend **re-validates that payload `gatewayId`/`deviceId` equals the authenticated identity** — never trust the broker ACL alone (belt-and-suspenders for T1/T2).
 - **Persistence:** append rows to the current `telemetry` partition; **upsert `sensor_latest`** per sensor.
 - **Rule hand-off seam:** persist first, then enqueue a reading event to a bounded in-process queue (consumed in Phase 7). Non-blocking — the MQTT callback never waits on rules.
@@ -294,7 +303,7 @@ flowchart TB
 > **Status note (2026-06-26):** `commands` table and entity exist; the issue / publish / ack / sweeper loop does not. **Security-critical:** the timeout sweeper is the **command-suppression detection signal** (T3) — an attacker dropping MQTT messages must surface as a `TIMEOUT`, not silence; emit an audit event that Phase 10 can subscribe to for alerting. `IdempotencyService` already exists — wire it on `POST /commands` per the spec.
 
 **Deliverables (what is achieved)**
-- **Issue:** `POST /v1/commands` (`OPERATOR`, **`Idempotency-Key` required**) → persist `command` as `PENDING`, publish to `iot/command/{device_id}` (QoS 1), return **`202`** + `Location`. Targeting a non-actuator or `DECOMMISSIONED` device → `422`.
+- **Issue:** `POST /v1/commands` (`OPERATOR`, **`Idempotency-Key` required**) → persist `command` as `PENDING`, publish to `iot/command/{device_id}` (QoS 1), return **`202`** + `Location`. Targeting a non-actuator or `DECOMMISSIONED` device → `422`. **Command-parameter whitelist (§7 input-validation table):** the `action` and `parameters` are validated against an allow-listed catalog per `device_type` (e.g. `exhst_fan` accepts `SET status ∈ {ON,OFF}` only) — anything outside the whitelist → `422` with the offending token. No free-form parameter pass-through to the device.
 - **Ack correlation:** subscribe `iot/command_ack/{device_id}`; correlate by `commandId`; advance `PENDING → RECEIVED → SUCCESS/FAILED`, stamping `received_at`/`executed_at`.
 - **Idempotent state-sets:** actions are `SET status=ON` style (not `TOGGLE`); document the device-side dedupe-on-`commandId` contract so QoS-1 redelivery is harmless (§5.5).
 - **Timeout sweeper:** scheduled job marks `PENDING/RECEIVED` commands `TIMEOUT` after N seconds without ack (config-driven).
@@ -385,13 +394,18 @@ flowchart TB
 - **Broker authorization:** per-device topic ACLs mapped from device identity (`device_id`/`gateway_id`), tied to credentials/scopes; verify a device cannot publish/subscribe another's topics (§7).
 - **Observability:** structured logging, metrics (ingest rate, queue depth, command timeouts, partition size), liveness/readiness probes, dashboards/alerts.
 - **Detection & incident response (§7):** alerting on repeated auth failures / credential stuffing, **refresh-token reuse-cascade triggered** (likely theft — signal from Phase 2.5), **broker ACL denials** (device publishing outside its topics → likely T1), commands from an **unexpected actor/target**, **telemetry gap/anomaly on a safety sensor**, and `403`/`429` spikes. **Device-compromise containment runbook:** suspend (`:suspend`) → decommission (`:decommission`) if confirmed → audit-review everything that identity did → cross-check neighbouring sensors for the compromise window (blast radius = one device, never the fleet).
-- **Security review:** TLS 1.2+ everywhere, headers, secret handling (write-once, hashed), brute-force limits, dependency scan; confirm no internal IDs/hashes leak on any DTO. Gate against the **§7 build-time security checklist** and confirm the **standards mapping** (OWASP API Security Top 10 + OWASP IoT Top 10) is satisfied.
-- **Deployment:** containerized build, prod profile, config/secret management, DB backup/restore + partition-aware retention runbook, broker runbook, rollback procedure.
+- **Security review:** TLS 1.2+ everywhere, headers, secret handling (write-once, hashed), brute-force limits; confirm no internal IDs/hashes leak on any DTO. Gate against the **§7 build-time security checklist** and confirm the **standards mapping** (OWASP API Security Top 10 + OWASP IoT Top 10) is satisfied.
+- **Secrets out of source/env, into KMS (§7 secrets table):** move JWT signing key, DB credentials, broker credentials, and TLS material into a KMS / secrets manager injected at runtime; remove plaintext fallbacks from `application-prod.yaml` and Compose. **JWT signing-key rollover:** switch from the current shared HMAC (`JWT_SECRET` env var) to asymmetric keys held in KMS, publish a JWKSet, **include `kid` on every issued token**, and chain `kid`-aware verification ahead of the denylist validator so a rolled-over key keeps prior-issued tokens valid until natural expiry. Document the rotation cadence.
+- **Encryption at rest & backups (§7 checklist):** enable encryption at rest for the Postgres volume (`pgcrypto` for column-level on the sensitive fields if applicable, plus storage-level encryption); enable WAL archiving + scheduled **encrypted** backups with a documented **restore-tested** runbook (rehearsed at least once before declaring Phase 10 done).
+- **Least-privilege DB user & network isolation (§7 trust-boundary table):** split the application's DB role from the Flyway-migration role so the running backend cannot DDL its own schema; restrict network reachability so only the backend reaches Postgres / Redis / broker over the trusted plane; document the boundary explicitly.
+- **Privacy: occupancy/presence data classification (§7 OWASP IoT mapping):** label readings from occupancy-bearing sensor types (e.g. light/motion/heartbeat patterns) as sensitive in the data-classification doc; confirm `VIEWER` access is least-privilege; consider shorter retention or aggregation-only access on that subset.
+- **CI security gates (§7 checklist):** in addition to SCA (dependency scan), gate merges on **SAST** (e.g. Semgrep / SpotBugs-FindSecBugs) and **secret scanning** (gitleaks or trufflehog). Document the failure-mode and bypass policy.
+- **Deployment:** containerized build, prod profile, KMS-injected config/secrets, DB backup/restore + partition-aware retention runbook, broker runbook, rollback procedure.
 - **Docs:** finalized OpenAPI, deprecation/versioning policy (`Deprecation`/`Sunset` headers), operational runbooks.
 
 **Modules:** all (cross-cutting); `security`, `mqtt`, `common`, ops/deploy.
 **Load-bearing decisions to honor:** broker as #1 SPOF mitigation; persistent-session/no-loss-on-reconnect; partition+retention automation; Redis-backed global limits; broker-side per-device ACLs (§7, §8); **detection & incident response + fail-safe-not-fail-open (§7)**.
-**DoD:** NFR targets met under load; broker restart loses no QoS-1 data; retention/partition jobs run unattended in prod; per-device ACLs enforced; no sensitive field leaks; **detection alerts fire on the §7 signals (auth-failure burst, reuse cascade, ACL denial, command anomaly, sensor gap, `403`/`429` spike); device-compromise runbook rehearsed**; §7 security checklist green; deploy + rollback rehearsed.
+**DoD:** NFR targets met under load; broker restart loses no QoS-1 data; retention/partition jobs run unattended in prod; per-device ACLs enforced; no sensitive field leaks; **detection alerts fire on the §7 signals (auth-failure burst, reuse cascade, ACL denial, command anomaly, sensor gap, `403`/`429` spike); device-compromise runbook rehearsed**; **JWT key rotated with `kid` rollover and verified to keep prior-issued tokens valid**; **encrypted backup restored to a clean instance end-to-end**; **CI gates SCA + SAST + secret scanning on merge**; §7 security checklist green; deploy + rollback rehearsed.
 **Tests:** load/perf suite vs targets; chaos test (broker down → fallback + recovery); ACL negative tests; partition/retention job tests; security scan; **detection-signal tests (each §7 alert condition triggers)**; end-to-end smoke across all flows.
 
 ---
@@ -485,6 +499,15 @@ All 44 OpenAPI operations are accounted for.
 | Ingest-time integrity: stale-replay timestamp check, per-device ingest rate limit, payload-identity re-validation (§7 abuse cases) | 4 |
 | Command-suppression detection + fail-safe actuator defaults (§7) | 6, 10 |
 | Detection & incident response; device-compromise containment runbook; OWASP API/IoT mapping; security-checklist gate (§7) | 10 |
+| JWT signing key in KMS with scheduled rotation + `kid` key-rollover (§7 secrets table) | 10 |
+| TLS / DB / broker credentials in KMS, injected at runtime (§7 secrets table) | 10 |
+| Encryption at rest + encrypted, restore-tested backups (§7 checklist) | 10 |
+| Least-privilege DB user + network isolation between backend and DB/broker/Redis (§7 trust boundaries) | 10 |
+| CI gates: SCA + SAST + secret scanning gating merges (§7 checklist) | 10 |
+| Command-parameter whitelist per device_type; reject non-actuator/decommissioned target (§7 input validation) | 6 |
+| Telemetry ingest rejects unknown `sensorType`; `valueNum` XOR `valueBool` (§7 input validation) | 4 |
+| Devices-ingest-only (T4): device JWTs rejected on user/admin endpoints (§7 threat model) | 3, 4, 5, 6, 7, 8 |
+| Privacy: occupancy/presence data classified sensitive; access + retention scoped (§7 OWASP IoT mapping) | 10 |
 | RFC 9457 errors, camelCase, URI versioning, idempotency keys (API §1) | 0 |
 
 ---
