@@ -81,7 +81,10 @@ One shape everywhere. `type` (stable, machine-readable) and `status` drive clien
 `200` read/update with body · `201` created (+ `Location`) · `202` async accepted (telemetry, heartbeat, command issue) · `204` no body (lifecycle transitions, deletes) · `400` malformed · `401` unauthenticated · `403` role/scope denied · `404` missing · `409` state conflict (duplicate id, lifecycle/version conflict) · `422` semantically invalid · `429` rate limited (+ `Retry-After`) · `500/503` server / broker-dependency fault. Never `200` with an error body.
 
 ### Rate limiting
-Per the data spec, enforced at the API filter (Redis-backed counters when multi-instance): **User 100/min, Device 300/min, Auth 20/min**, telemetry-ingest configurable. Over-limit → `429` with `Retry-After` and `RateLimit-*` headers.
+Per the data spec, enforced at the API filter (Redis-backed counters when multi-instance): **User 100/min, Device 300/min, Auth 20/min**, telemetry-ingest configurable. Telemetry ingest is rate-limited **per device** — this is the control against *sensor flooding/blinding* (spamming readings to mask a real event), so the limit is keyed to the authenticated device identity, not a global bucket. Over-limit → `429` with `Retry-After` and `RateLimit-*` headers. A spike in `403`/`429` is itself a probing/abuse signal and is surfaced to detection (see the system design §7 "Detection & incident response").
+
+### Security headers
+Every REST response carries `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and a `Content-Security-Policy`. TLS 1.2+ is mandatory (HTTPS at the edge); plain HTTP is disabled in production. These are set globally at the edge/filter, not per-endpoint.
 
 ---
 
@@ -231,7 +234,9 @@ Devices `POST` telemetry **only when MQTT is unavailable** (same Telemetry Servi
 | `POST /v1/telemetry` | HTTP fallback ingest (batch of readings) | device scope `telemetry:publish` | `202` |
 | `GET /v1/telemetry` | History query (cursor paged) | user `VIEWER`+ | `200` |
 
-**`POST /v1/telemetry`** — accepted, not synchronously processed, mirroring the async ingest pipeline. Returns `202`; validation of payload shape is synchronous (`422` on bad shape), persistence + rule hand-off are async.
+**`POST /v1/telemetry`** — accepted, not synchronously processed, mirroring the async ingest pipeline. Returns `202`; validation of payload shape is synchronous (`422` on bad shape), persistence + rule hand-off are async. Two device-plane integrity checks run synchronously before the `202`:
+- **Payload identity must match the token** ("belt and suspenders" — the backend never trusts the transport alone). The body `gatewayId` must equal the authenticated device identity; a mismatch is `403` (a device cannot publish telemetry as another). Unknown `sensorType` values are rejected → `422`.
+- **Stale-replay defense.** The server stamps its **own** ingest timestamp; the device-supplied `ts` is retained as the capture time but readings whose `ts` skews implausibly from server time (future-dated, or too far in the past — a replayed "all clear") are rejected → `422`. This stops an attacker replaying an old reading to mask a live event.
 ```json
 {
   "gatewayId": "gw_office1_01",
@@ -350,7 +355,7 @@ Issue returns **`202`**, not `201`: the resource (the command record) exists, bu
 }
 ```
 
-Because MQTT QoS 1 is at-least-once, **commands are idempotent state-sets** (`SET status=ON`, not `TOGGLE`) and devices dedupe on `commandId` — so a redelivery is harmless. There is deliberately **no cancel/delete** endpoint: a command in flight cannot be recalled; issue the inverse state-set instead. Commands with no ack within the window are swept to `TIMEOUT` server-side; clients observe this purely through `status`. Targeting a non-actuator or a `DECOMMISSIONED` device → `422`.
+Because MQTT QoS 1 is at-least-once, **commands are idempotent state-sets** (`SET status=ON`, not `TOGGLE`) and devices dedupe on `commandId` — so a redelivery is harmless. There is deliberately **no cancel/delete** endpoint: a command in flight cannot be recalled; issue the inverse state-set instead. Commands with no ack within the window are swept to `TIMEOUT` server-side; clients observe this purely through `status` (the timeout sweeper doubles as *command-suppression detection* — an attacker dropping MQTT can't silently suppress `exhaust ON`). `action` and `parameters` are **whitelisted** against the actuator's contract — no free-form passthrough to the device — so injection through command params is rejected at the edge. Targeting a non-actuator or a `DECOMMISSIONED` device, or an unknown action/param → `422`.
 
 ---
 
@@ -506,4 +511,4 @@ Drawn so the next likely change is additive, not breaking — tracking the syste
 ---
 
 ### Verdict
-✅ **A REST edge that matches the architecture's grain.** It honours the system design's load-bearing decisions — the current-state/history split (§6 vs §5), command idempotency and the async ack lifecycle (`202` + polling, no cancel), the one-ingestion-funnel fallback (`POST /telemetry` → same service), write-once device secrets, safe-evaluator rule validation on write, and append-only audit. The conventions (one error shape, bounded pagination, URI versioning, idempotency keys, scope/role gates) are uniform so clients integrate once. The deliberate constraints worth noting to consumers are **mandatory time-window scoping on the partitioned reads** (telemetry, audit) and the **one-sample eventual consistency** of the live state path.
+✅ **A REST edge that matches the architecture's grain.** It honours the system design's load-bearing decisions — the current-state/history split (§6 vs §5), command idempotency and the async ack lifecycle (`202` + polling, no cancel), the one-ingestion-funnel fallback (`POST /telemetry` → same service), write-once device secrets, safe-evaluator rule validation on write, and append-only audit. The conventions (one error shape, bounded pagination, URI versioning, idempotency keys, scope/role gates) are uniform so clients integrate once. The deliberate constraints worth noting to consumers are **mandatory time-window scoping on the partitioned reads** (telemetry, audit), the **one-sample eventual consistency** of the live state path, and the **device-plane integrity checks** on ingest (payload identity must match the token → `403`; implausible-skew readings rejected as stale-replay → `422`) that follow from treating this as a safety system, not just a data system.

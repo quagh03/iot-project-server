@@ -1,14 +1,77 @@
 openapi: 3.0.3
 info:
   title: Office IoT Monitoring & Control — REST API
-  description: >
+  description: |
     REST edge for the Office IoT Monitoring & Control platform: dashboard
     (current state, history, alerts, command status), administration (device
     registry & lifecycle, credentials, users/RBAC, rules, audit), and the
     device HTTP ingest fallback (telemetry, heartbeat). The MQTT
-    telemetry/command/heartbeat path is a separate async contract and is not
-    described here. Errors follow RFC 9457 (Problem Details). Timestamps are
-    ISO-8601 UTC. JSON is camelCase.
+    telemetry/command/heartbeat path is a separate async contract and is
+    referenced, not restated, here.
+
+    ## Consumers
+    - **Dashboard** (operators, low-tens concurrent) — User JWT (`VIEWER`+).
+      Reads current state per zone/sensor (< 300 ms), history over a range
+      (< 1 s), device online/offline, alerts, command status.
+    - **Admin** (super-admin/admin) — User JWT (`ADMIN`+). Device registry &
+      lifecycle, credentials, users/RBAC, rules, audit.
+    - **Devices** (HTTP fallback only — MQTT is primary) — device token
+      (client-credentials + scopes). `POST` telemetry / heartbeat when the
+      broker is unreachable; devices may call **only** the ingest fallback
+      endpoints.
+
+    ## Conventions
+    - **Versioning:** URI versioning (`/v1/`). Additive changes (new optional
+      fields, endpoints, query params) ship within `v1`; only
+      removals/renames/type-changes/tightened validation warrant `v2`.
+      Deprecations are announced with `Deprecation: true` + `Sunset: <date>`
+      response headers and a multi-month migration window.
+    - **Casing & dates:** JSON is camelCase. Timestamps are ISO-8601 UTC
+      (`2026-06-25T10:30:00Z`). IDs are opaque strings on the wire — internal
+      row PKs are never exposed.
+    - **Auth:** `Authorization: Bearer <access_token>` on every request
+      except `POST /auth/login`, `POST /auth/refresh`, and
+      `POST /oauth2/token`. Users carry a stateless JWT (1 h) with role
+      (`SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`); devices carry an OAuth2
+      client-credentials token gated by scopes.
+    - **Pagination:** cursor-based for large/append-only or time-ordered
+      sets (telemetry, commands, alerts, audit-logs); offset-based for
+      small/stable admin sets (devices, users, rules, sensors). `pageSize`
+      default 50, max 200.
+    - **Filtering & sorting:** `?zone=office_1&status=ACTIVE&sort=-createdAt`.
+      A leading `-` means descending. Time ranges use `from`/`to` (inclusive
+      / exclusive respectively), ISO-8601.
+    - **Idempotency:** state-changing `POST`s accept an `Idempotency-Key`
+      header (client-generated UUID); the original result is returned on
+      retry within a 24 h window. Required for `POST /commands`; supported
+      for `POST /devices` and credential issue/rotate.
+    - **Errors:** one shape everywhere — RFC 9457 Problem Details.
+      `type` (stable, machine-readable) and `status` drive client branching;
+      `detail` is human-facing and may change. Validation lists **every**
+      failing field. Never `200` with an error body. Stack traces and
+      internal messages are never leaked.
+    - **Rate limiting:** enforced at the API filter (Redis-backed counters
+      when multi-instance): User **100/min**, Device **300/min**, Auth
+      **20/min**, telemetry-ingest configurable. Telemetry ingest is limited
+      **per device** (keyed to the authenticated identity) — the control
+      against sensor flooding/blinding. Over-limit → `429` with `Retry-After`
+      and `RateLimit-*` headers; a spike in `403`/`429` is itself an abuse
+      signal surfaced to detection.
+    - **Security headers:** every response carries
+      `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`,
+      `X-Frame-Options: DENY`, and a `Content-Security-Policy`. TLS 1.2+ is
+      mandatory; plain HTTP is disabled in production. Set globally at the
+      edge, not per-operation.
+
+    ## Deliberate constraints to consumers
+    - Mandatory bounded time window on partitioned reads (telemetry, audit)
+      to protect against accidental full scans.
+    - Current-state reads are **eventually consistent by one sample** —
+      acceptable per consistency targets, not transactional.
+    - Device-plane integrity (safety system, not just a data system): on
+      ingest, the payload identity must match the authenticated device token
+      (mismatch → `403`) and readings with implausible timestamp skew are
+      rejected as stale-replay (→ `422`).
   version: 1.0.0
   contact:
     name: IoT Platform Team
@@ -21,27 +84,74 @@ servers:
 
 tags:
   - name: Authentication
-    description: User sign-in and device token issuance.
+    description: >
+      User sign-in (JWT + rotating refresh) and device client-credentials token
+      issuance. Auth endpoints are rate-limited to 20/min to blunt brute force.
+      Refresh tokens are rotated on use and stored hashed server-side so they
+      can be revoked before their 30-day expiry.
   - name: Users
-    description: Operator accounts and RBAC (admin).
+    description: >
+      Operator accounts and RBAC. Role hierarchy `SUPER_ADMIN > ADMIN >
+      OPERATOR > VIEWER`. `SUPER_ADMIN` is required to grant
+      `ADMIN`/`SUPER_ADMIN`; `ADMIN` may manage `OPERATOR`/`VIEWER`. Every
+      role/status change writes an audit log entry.
   - name: Devices
-    description: Device registry and lifecycle (admin / dashboard read).
+    description: >
+      Device registry and explicit lifecycle transitions. Lifecycle changes
+      have side effects (suspend disables credentials; decommission revokes
+      credentials and topic ACLs and is irreversible), so they are named
+      actions rather than a free-form `PATCH status` — this prevents illegal
+      jumps and makes intent auditable.
   - name: Device Credentials
-    description: Device client-credentials and scopes (admin).
+    description: >
+      Device client-credentials and OAuth2 scopes. The client secret is
+      returned **exactly once**, at issue or rotation, and never again — only
+      metadata is readable afterward. Rotation issues a new secret while the
+      previous secret stays valid for a grace window. All issue/rotation/scope
+      changes are audited.
   - name: Telemetry
-    description: HTTP fallback ingest and time-series history query.
+    description: >
+      HTTP fallback ingest and time-series history query. Devices `POST` only
+      when MQTT is unavailable (same Telemetry Service funnel as the broker
+      path). History queries require a bounded time window plus exactly one of
+      `sensorId` / `zone` so the partitioned table is never scanned unbounded.
   - name: Current State
-    description: Latest per-sensor readings and device connectivity (dashboard hot path).
+    description: >
+      Dashboard hot path. "What is each zone reading **now**" and "is this
+      device online", served from `sensor_latest` / `device_health`, never
+      from the telemetry partitions. **Eventually consistent by one sample** —
+      the live view may lag the freshest reading.
   - name: Heartbeat
-    description: HTTP fallback connectivity upsert.
+    description: >
+      HTTP fallback connectivity upsert when MQTT/LWT is unavailable. Updates
+      the single `device_health` row, not a history table. The authenticated
+      device identity must match the body `deviceId`.
   - name: Commands
-    description: Actuator command issue and lifecycle status.
+    description: >
+      Actuator command issue and lifecycle status (`PENDING → RECEIVED →
+      SUCCESS/FAILED/TIMEOUT`). Acks arrive over MQTT
+      (`iot/command_ack/{device_id}`), not REST — this surface only issues and
+      reports. Commands are **idempotent state-sets** (`SET status=ON`, not
+      `TOGGLE`); a redelivery is harmless. There is **no cancel/delete** — to
+      undo, issue the inverse state-set.
   - name: Rules
-    description: Rule engine CRUD (admin).
+    description: >
+      Rule engine CRUD. `condition`/`action` are validated **on write**
+      against a restricted expression grammar (a safe SpEL/DSL evaluator —
+      never `eval`). Bad rules are rejected at the door rather than failing
+      silently at evaluation time. Rule changes are audited.
   - name: Alerts
-    description: Alert listing and acknowledgement / resolution.
+    description: >
+      Alert listing and explicit acknowledge / resolve transitions. Status is
+      driven by named actions rather than a writable `status` field so the
+      audit trail captures *who* acknowledged *what*.
   - name: Audit
-    description: Append-only audit log query (admin).
+    description: >
+      Append-only audit log query. There is no create/update/delete endpoint;
+      entries are written internally by each module (login, registration,
+      credential rotation, rule change, command execution, role change). The
+      query hits the partitioned `audit_logs` table and so requires a bounded
+      time window like telemetry.
 
 security:
   - userBearer: []
@@ -53,7 +163,10 @@ paths:
     post:
       tags: [Authentication]
       summary: User sign-in
-      description: Exchange username/password for an access token and a rotating refresh token. Rate-limited to 20/min.
+      description: >
+        Exchange username/password for a 1 h access token and a 30-day rotating
+        refresh token. Rate-limited to 20/min per source. Bad credentials
+        return `401` (never `403`, never a 200-with-error).
       operationId: login
       security: []
       requestBody:
@@ -75,7 +188,12 @@ paths:
     post:
       tags: [Authentication]
       summary: Rotate refresh token
-      description: Mint a new access token and rotate the refresh token (old one revoked). Reuse of a revoked token returns 401.
+      description: >
+        Mint a new access token and rotate the refresh token — the old one is
+        revoked atomically. Reuse of a revoked token returns `401` with type
+        `.../errors/token-revoked` (a stateless token you cannot kill is a
+        liability; rotation + hashed server-side storage is the mitigation).
+        Rate-limited to 20/min.
       operationId: refresh
       security: []
       requestBody:
@@ -96,6 +214,10 @@ paths:
     post:
       tags: [Authentication]
       summary: Revoke the presented refresh token
+      description: >
+        Revokes the presented refresh token immediately. The currently-issued
+        access token remains valid until its 1 h expiry (stateless JWT); clients
+        should discard it.
       operationId: logout
       security: []
       requestBody:
@@ -112,9 +234,12 @@ paths:
       tags: [Authentication]
       summary: Device client-credentials grant
       description: >
-        OAuth2 client-credentials token endpoint for devices. Granted scopes are
-        the intersection of the device's stored scopes and any requested. The
-        resulting token may be used only for telemetry/heartbeat ingest fallback.
+        OAuth2 client-credentials token endpoint for devices. Standard
+        form-encoded params; granted scopes are the **intersection** of the
+        device's stored scopes and any requested via the `scope` parameter.
+        The resulting token may be used **only** for the HTTP ingest fallback
+        endpoints (`POST /telemetry`, `POST /heartbeat`) — devices are
+        forbidden from any other surface. Rate-limited to 20/min.
       operationId: deviceToken
       security: []
       requestBody:
@@ -136,6 +261,7 @@ paths:
     get:
       tags: [Users]
       summary: List users
+      description: Offset-paged listing of operator accounts. Min role `ADMIN`.
       operationId: listUsers
       parameters:
         - { name: role, in: query, schema: { $ref: '#/components/schemas/Role' } }
@@ -160,6 +286,10 @@ paths:
     post:
       tags: [Users]
       summary: Create a user
+      description: >
+        Create an operator account. Min role `ADMIN`. Setting a `role` above
+        the caller's own authority returns `403`. Duplicate username → `409`.
+        No `passwordHash` is ever accepted or returned. Audited.
       operationId: createUser
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -187,6 +317,7 @@ paths:
     get:
       tags: [Users]
       summary: Read a user
+      description: Min role `ADMIN`.
       operationId: getUser
       responses:
         '200':
@@ -200,6 +331,9 @@ paths:
     patch:
       tags: [Users]
       summary: Update role / status
+      description: >
+        Min role `ADMIN`. Setting `role` above the caller's own authority →
+        `403`. Every role/status change writes an audit entry.
       operationId: updateUser
       requestBody:
         required: true
@@ -219,7 +353,10 @@ paths:
     delete:
       tags: [Users]
       summary: Soft-delete a user
-      description: Sets status DISABLED and revokes the user's refresh tokens.
+      description: >
+        Sets status `DISABLED` and revokes the user's refresh tokens. The
+        record is preserved for audit-trail referential integrity (no hard
+        delete). Min role `ADMIN`.
       operationId: deleteUser
       responses:
         '204': { description: Disabled. }
@@ -233,7 +370,9 @@ paths:
     post:
       tags: [Users]
       summary: Issue a password reset
-      description: Triggers a reset flow. No plaintext password is accepted or returned.
+      description: >
+        Triggers a reset flow. No plaintext password is accepted or returned.
+        Callable by `ADMIN` for any user, or by the target user themselves.
       operationId: resetUserPassword
       responses:
         '204': { description: Reset initiated. }
@@ -246,6 +385,7 @@ paths:
     get:
       tags: [Devices]
       summary: List devices
+      description: Offset-paged listing of the device registry. Min role `VIEWER`.
       operationId: listDevices
       parameters:
         - $ref: '#/components/parameters/ZoneFilter'
@@ -272,6 +412,10 @@ paths:
     post:
       tags: [Devices]
       summary: Register a device
+      description: >
+        Register a gateway, sensor, or actuator. Min role `ADMIN`. Duplicate
+        `deviceId` → `409`. A sensor without a valid `parentGatewayId` → `422`.
+        Idempotent via `Idempotency-Key`. Audited.
       operationId: registerDevice
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -299,6 +443,7 @@ paths:
     get:
       tags: [Devices]
       summary: Read a device
+      description: Min role `VIEWER`.
       operationId: getDevice
       responses:
         '200':
@@ -311,7 +456,10 @@ paths:
     patch:
       tags: [Devices]
       summary: Update device metadata
-      description: Update firmware version, zone, or device type.
+      description: >
+        Update mutable metadata (firmware version, zone, device type). Min
+        role `ADMIN`. **Status is not patchable here** — use the explicit
+        lifecycle action endpoints. Audited.
       operationId: updateDevice
       requestBody:
         required: true
@@ -335,6 +483,7 @@ paths:
     get:
       tags: [Devices]
       summary: List sensors parented by a gateway
+      description: Min role `VIEWER`. Empty list if no sensors are parented.
       operationId: listGatewaySensors
       responses:
         '200':
@@ -356,7 +505,11 @@ paths:
     post:
       tags: [Devices]
       summary: Activate a device
-      description: Transition INACTIVE/SUSPENDED to ACTIVE.
+      description: >
+        Lifecycle transition `INACTIVE | SUSPENDED → ACTIVE`. Re-enables the
+        device's credentials and broker topic ACLs. Min role `ADMIN`. An
+        illegal transition (e.g. activating a `DECOMMISSIONED` device) →
+        `409` with type `.../errors/invalid-lifecycle-transition`. Audited.
       operationId: activateDevice
       responses:
         '204': { description: Activated. }
@@ -371,7 +524,10 @@ paths:
     post:
       tags: [Devices]
       summary: Suspend a device
-      description: Transition ACTIVE to SUSPENDED; disables the device's credentials.
+      description: >
+        Lifecycle transition `ACTIVE → SUSPENDED`. Side effects: disables the
+        device's credentials so it cannot mint new tokens or publish. Min role
+        `ADMIN`. Illegal transition → `409`. Audited.
       operationId: suspendDevice
       responses:
         '204': { description: Suspended. }
@@ -386,7 +542,10 @@ paths:
     post:
       tags: [Devices]
       summary: Decommission a device
-      description: Terminal transition; revokes credentials and broker topic ACLs. Irreversible.
+      description: >
+        Terminal lifecycle transition `* → DECOMMISSIONED`. Side effects:
+        revokes credentials and broker topic ACLs. **Irreversible** —
+        `activate` afterwards returns `409`. Min role `ADMIN`. Audited.
       operationId: decommissionDevice
       responses:
         '204': { description: Decommissioned. }
@@ -402,7 +561,10 @@ paths:
     get:
       tags: [Device Credentials]
       summary: Read credential metadata
-      description: Returns clientId and rotation metadata only. The secret is never readable after issue.
+      description: >
+        Returns `clientId` and rotation metadata only. The client secret is
+        write-once: never readable after issue or rotation — only metadata is
+        exposed. Min role `ADMIN`.
       operationId: getDeviceCredentialMetadata
       responses:
         '200':
@@ -416,7 +578,12 @@ paths:
     post:
       tags: [Device Credentials]
       summary: Issue first credential
-      description: Issues a client_id/client_secret. The secret is shown exactly once.
+      description: >
+        Issues a `clientId` / `clientSecret` pair. The secret is shown
+        **exactly once** in this response — if lost, the only recovery path
+        is to `rotate`. Re-issuing for a device that already has a credential
+        → `409` (use rotate instead). Min role `ADMIN`. Idempotent via
+        `Idempotency-Key`. Audited.
       operationId: issueDeviceCredential
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -437,7 +604,11 @@ paths:
     post:
       tags: [Device Credentials]
       summary: Rotate credential
-      description: Issues a new secret (shown once); the previous secret stays valid for a grace window.
+      description: >
+        Issues a new secret (shown **once** as `clientSecret`). The previous
+        secret stays valid until `graceExpiresAt` so the device can update
+        in-place without downtime. Min role `ADMIN`. Idempotent via
+        `Idempotency-Key`. Audited.
       operationId: rotateDeviceCredential
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -457,6 +628,7 @@ paths:
     get:
       tags: [Device Credentials]
       summary: List granted scopes
+      description: Min role `ADMIN`.
       operationId: getDeviceScopes
       responses:
         '200':
@@ -470,6 +642,11 @@ paths:
     put:
       tags: [Device Credentials]
       summary: Replace the scope set
+      description: >
+        Full replace (PUT, not PATCH) — the granted scope set is unambiguous
+        in one request. New tokens minted via `/oauth2/token` will intersect
+        against this set; existing tokens keep their original scopes until
+        expiry. Min role `ADMIN`. Audited.
       operationId: replaceDeviceScopes
       requestBody:
         required: true
@@ -493,9 +670,22 @@ paths:
       tags: [Telemetry]
       summary: HTTP fallback ingest
       description: >
-        Accept a batch of readings when MQTT is unavailable. Payload shape is
-        validated synchronously; persistence and rule hand-off are asynchronous.
-        Device-authenticated; the token must carry scope telemetry:publish.
+        Accept a batch of readings when MQTT is unavailable. Funnels through
+        the same Telemetry Service as the broker path, so behavior is
+        consistent. Payload shape is validated synchronously (`422` on bad
+        shape); persistence and rule hand-off are asynchronous — hence `202`.
+        Device-authenticated; the token must carry scope `telemetry:publish`.
+        A reading is numeric **or** boolean — exactly one of `valueNum` /
+        `valueBool` is present per item; unknown `sensorType` values are
+        rejected (`422`).
+
+        **Device-plane integrity (synchronous, before `202`):** the body
+        `gatewayId` must equal the authenticated device identity — a mismatch
+        is `403` (a device cannot publish as another; the backend never trusts
+        the transport alone). The server stamps its own ingest timestamp;
+        readings whose device-supplied `ts` skews implausibly from server time
+        (future-dated, or far enough in the past to be a replayed "all clear")
+        are rejected as stale-replay → `422`.
       operationId: ingestTelemetry
       security:
         - deviceOAuth: ['telemetry:publish']
@@ -514,9 +704,12 @@ paths:
       tags: [Telemetry]
       summary: Query telemetry history
       description: >
-        Cursor-paged time-series query. Exactly one of sensorId or zone is
-        required, plus a bounded time window — these map to the indexed query
-        shapes. Missing scope or an unbounded window returns 422.
+        Cursor-paged time-series query against the partitioned telemetry
+        table. Exactly one of `sensorId` or `zone` is **required**, plus a
+        bounded time window (`from` / `to`). These map to the
+        `(sensor_id, ts DESC)` / `(zone, ts DESC)` indexes; missing scope or
+        an unbounded/oversized window returns `422` (protects the big table
+        from accidental full scans). Min role `VIEWER`.
       operationId: queryTelemetry
       parameters:
         - { name: sensorId, in: query, schema: { type: string } }
@@ -545,7 +738,12 @@ paths:
     get:
       tags: [Current State]
       summary: Latest reading per sensor
-      description: Dashboard hot path served from sensor_latest. Eventually consistent by one sample.
+      description: >
+        Dashboard hot path (< 300 ms target). Served from `sensor_latest`,
+        never from the telemetry partitions. **Eventually consistent by one
+        sample** — the live view may lag the freshest reading; do not treat
+        as transactional. Responses are safe to send with a short
+        `Cache-Control: max-age` for polling clients. Min role `VIEWER`.
       operationId: getCurrentState
       parameters:
         - $ref: '#/components/parameters/ZoneFilter'
@@ -570,6 +768,9 @@ paths:
     get:
       tags: [Current State]
       summary: Latest reading for one sensor
+      description: >
+        Single-sensor variant of `/current-state`. Eventually consistent by one
+        sample. Min role `VIEWER`.
       operationId: getSensorLatest
       responses:
         '200':
@@ -586,6 +787,9 @@ paths:
     get:
       tags: [Current State]
       summary: Latest device health & connectivity
+      description: >
+        Latest row from `device_health` — connection status, last seen, and
+        most recent resource telemetry (memory, CPU, RSSI). Min role `VIEWER`.
       operationId: getDeviceHealth
       responses:
         '200':
@@ -600,6 +804,10 @@ paths:
     get:
       tags: [Current State]
       summary: Online/offline roll-up
+      description: >
+        Aggregated online/offline counts across devices, optionally scoped by
+        zone. The `offlineDevices` list is bounded — large fleets should drill
+        in via `/devices/{deviceId}/health`. Min role `VIEWER`.
       operationId: getConnectivity
       parameters:
         - $ref: '#/components/parameters/ZoneFilter'
@@ -617,9 +825,11 @@ paths:
       tags: [Heartbeat]
       summary: HTTP fallback heartbeat
       description: >
-        Upsert the calling device's latest health row. The authenticated device
-        identity must match the body deviceId, otherwise 403. Device-authenticated
-        with scope heartbeat:publish.
+        Upsert the calling device's latest `device_health` row (single row per
+        device — not a history table). Returns `202`; the upsert is applied
+        asynchronously. The authenticated device identity **must** match the
+        body `deviceId`; otherwise `403` (a device cannot report health for
+        another). Device-authenticated with scope `heartbeat:publish`.
       operationId: ingestHeartbeat
       security:
         - deviceOAuth: ['heartbeat:publish']
@@ -640,6 +850,10 @@ paths:
     get:
       tags: [Commands]
       summary: List commands
+      description: >
+        Cursor-paged list of commands; the dashboard uses this for the
+        command history view. Time window is recommended on large fleets.
+        Min role `VIEWER`.
       operationId: listCommands
       parameters:
         - { name: targetId, in: query, schema: { type: string } }
@@ -665,9 +879,23 @@ paths:
       tags: [Commands]
       summary: Issue a command
       description: >
-        Persist a command and publish it to the actuator over MQTT. Returns 202
-        because the actuator effect is asynchronous; poll GET /commands/{id} for
-        lifecycle status. Idempotency-Key is required so QoS-1 retries are safe.
+        Persist a command record and publish it to the actuator over MQTT.
+        Returns **`202`**, not `201`: the resource (the command record)
+        exists, but the *effect* (actuator reacting) is asynchronous over
+        MQTT — poll `GET /commands/{commandId}` for the
+        `PENDING → RECEIVED → SUCCESS/FAILED/TIMEOUT` lifecycle. Acks arrive
+        over MQTT (`iot/command_ack/{device_id}`), not REST.
+
+        **`Idempotency-Key` is required** so MQTT QoS-1 at-least-once
+        retries are safe. Commands are **idempotent state-sets**
+        (`SET status=ON`, not `TOGGLE`) and devices dedupe on `commandId`,
+        so a redelivery is harmless. There is deliberately **no cancel /
+        delete** — a command in flight cannot be recalled; issue the inverse
+        state-set instead. Commands with no ack within the window are swept
+        to `TIMEOUT` server-side.
+
+        Targeting a non-actuator or a `DECOMMISSIONED` device → `422`. Min
+        role `OPERATOR`. Audited.
       operationId: issueCommand
       parameters:
         - $ref: '#/components/parameters/IdempotencyKeyRequired'
@@ -695,6 +923,10 @@ paths:
     get:
       tags: [Commands]
       summary: Command status / lifecycle
+      description: >
+        Poll target for `PENDING → RECEIVED → SUCCESS/FAILED/TIMEOUT`. Clients
+        observe `TIMEOUT` purely through `status` — there is no separate
+        timeout endpoint. Min role `VIEWER`.
       operationId: getCommand
       responses:
         '200':
@@ -710,6 +942,7 @@ paths:
     get:
       tags: [Rules]
       summary: List rules
+      description: Offset-paged. Min role `OPERATOR`.
       operationId: listRules
       parameters:
         - { name: enabled, in: query, schema: { type: boolean } }
@@ -732,7 +965,14 @@ paths:
     post:
       tags: [Rules]
       summary: Create a rule
-      description: condition/action are validated against the restricted expression grammar on write.
+      description: >
+        Create a rule evaluated asynchronously against telemetry/state.
+        `condition` / `action` are validated **on write** against the
+        restricted expression grammar (a safe SpEL/DSL evaluator — never
+        `eval`). A condition that references unknown state, uses disallowed
+        syntax, or fails to parse → `422` with the offending token, so bad
+        rules are rejected at the door rather than failing silently at
+        evaluation time. Min role `ADMIN`. Audited.
       operationId: createRule
       requestBody:
         required: true
@@ -757,6 +997,7 @@ paths:
     get:
       tags: [Rules]
       summary: Read a rule
+      description: Min role `OPERATOR`.
       operationId: getRule
       responses:
         '200':
@@ -769,6 +1010,10 @@ paths:
     put:
       tags: [Rules]
       summary: Replace a rule
+      description: >
+        Full rewrite. `condition` / `action` re-validated against the
+        expression grammar; `422` on parse/semantic failure. Min role `ADMIN`.
+        Audited.
       operationId: replaceRule
       requestBody:
         required: true
@@ -788,6 +1033,9 @@ paths:
     patch:
       tags: [Rules]
       summary: Toggle enabled / change priority
+      description: >
+        Narrow patch for the common toggle/priority case. To change
+        `condition` or `action`, use `PUT`. Min role `ADMIN`. Audited.
       operationId: updateRule
       requestBody:
         required: true
@@ -807,6 +1055,8 @@ paths:
     delete:
       tags: [Rules]
       summary: Delete a rule
+      description: >
+        Removes the rule from evaluation. Min role `ADMIN`. Audited.
       operationId: deleteRule
       responses:
         '204': { description: Deleted. }
@@ -819,6 +1069,9 @@ paths:
     get:
       tags: [Alerts]
       summary: List alerts
+      description: >
+        Cursor-paged list of alerts, filterable by status / zone / severity /
+        time window. Min role `VIEWER`.
       operationId: listAlerts
       parameters:
         - { name: status, in: query, schema: { $ref: '#/components/schemas/AlertStatus' } }
@@ -848,6 +1101,7 @@ paths:
     get:
       tags: [Alerts]
       summary: Read an alert
+      description: Min role `VIEWER`.
       operationId: getAlert
       responses:
         '200':
@@ -864,7 +1118,11 @@ paths:
     post:
       tags: [Alerts]
       summary: Acknowledge an alert
-      description: Transition OPEN to ACK.
+      description: >
+        Explicit transition `OPEN → ACK`. Driven by named action rather than
+        a writable `status` so the audit trail captures *who* acknowledged
+        *what*. Acknowledging an already-resolved alert → `409`. Min role
+        `OPERATOR`. Audited.
       operationId: acknowledgeAlert
       responses:
         '200':
@@ -883,7 +1141,10 @@ paths:
     post:
       tags: [Alerts]
       summary: Resolve an alert
-      description: Transition to RESOLVED.
+      description: >
+        Explicit transition `OPEN | ACK → RESOLVED`. Resolving a
+        non-existent or already-resolved alert → `409`. Min role `OPERATOR`.
+        Audited.
       operationId: resolveAlert
       responses:
         '200':
@@ -901,7 +1162,13 @@ paths:
     get:
       tags: [Audit]
       summary: Query audit logs
-      description: Append-only. Requires a bounded time window like telemetry.
+      description: >
+        Cursor-paged query over the partitioned, **append-only** `audit_logs`
+        table. There is no create/update/delete endpoint — entries are
+        written internally by each module (login, registration/deletion,
+        credential rotation, rule change, command execution, role change).
+        A bounded time window (`from` / `to`) is **required** like telemetry;
+        unbounded or oversized windows → `422`. Min role `ADMIN`.
       operationId: queryAuditLogs
       parameters:
         - { name: actor, in: query, schema: { type: string } }
@@ -936,18 +1203,25 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: User JWT access token (1 h). Carries role for RBAC.
+      description: >
+        User JWT access token (1 h). Carries role
+        (`SUPER_ADMIN | ADMIN | OPERATOR | VIEWER`) for RBAC. Refresh via
+        `POST /auth/refresh` (rotating refresh token, 30-day expiry, server
+        revocable).
     deviceOAuth:
       type: oauth2
-      description: Device client-credentials token, gated by scopes.
+      description: >
+        Device client-credentials token, gated by scopes. Granted scopes are
+        the intersection of the device's stored scopes and any requested.
+        Usable **only** for HTTP ingest fallback endpoints.
       flows:
         clientCredentials:
           tokenUrl: https://api.iot.example.com/api/v1/oauth2/token
           scopes:
-            telemetry:publish: Publish telemetry readings.
-            heartbeat:publish: Publish heartbeat / health.
-            command:subscribe: Subscribe to commands (MQTT).
-            command:ack: Acknowledge commands (MQTT).
+            telemetry:publish: Publish telemetry readings (HTTP fallback ingest).
+            heartbeat:publish: Publish heartbeat / health (HTTP fallback).
+            command:subscribe: Subscribe to commands (MQTT — not REST).
+            command:ack: Acknowledge commands (MQTT — not REST).
 
   headers:
     Location:
@@ -973,38 +1247,50 @@ components:
     PageSize:
       name: pageSize
       in: query
+      description: Items per page. Bounded (default 50, max 200) to protect read paths.
       schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
     Cursor:
       name: cursor
       in: query
-      description: Opaque cursor from a previous page's nextCursor.
+      description: >
+        Opaque cursor from a previous page's `nextCursor`. Stable under
+        concurrent writes; do not parse or modify.
       schema: { type: string }
     Offset:
       name: offset
       in: query
+      description: Zero-based offset into the result set. Used by stable admin lists.
       schema: { type: integer, minimum: 0, default: 0 }
     Limit:
       name: limit
       in: query
+      description: Items per page for offset-paged endpoints (default 50, max 200).
       schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
     Sort:
       name: sort
       in: query
-      description: Field name; prefix with '-' for descending (e.g. -createdAt).
+      description: >
+        Field name; prefix with `-` for descending (e.g. `-createdAt`). Only
+        whitelisted fields per endpoint are sortable.
       schema: { type: string }
     From:
       name: from
       in: query
-      description: Inclusive start of time window (ISO-8601 UTC).
+      description: >
+        Inclusive start of time window (ISO-8601 UTC). Required for
+        partitioned reads (telemetry, audit, commands list).
       schema: { type: string, format: date-time }
     To:
       name: to
       in: query
-      description: Exclusive end of time window (ISO-8601 UTC).
+      description: >
+        Exclusive end of time window (ISO-8601 UTC). The `(from, to)` span is
+        bounded server-side; oversized windows → `422`.
       schema: { type: string, format: date-time }
     ZoneFilter:
       name: zone
       in: query
+      description: Zone identifier (e.g. `office_1`). Unknown zones return an empty list, not `404`.
       schema: { type: string }
     UserId:
       name: userId
@@ -1039,37 +1325,44 @@ components:
 
   responses:
     BadRequest:
-      description: Malformed request.
+      description: Malformed request — JSON parse failure or schema-level violation.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     Unauthorized:
-      description: Not authenticated.
+      description: Not authenticated — missing, expired, or revoked credential.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     Forbidden:
-      description: Authenticated but not allowed (role or scope).
+      description: Authenticated but not allowed by role (user) or scope (device).
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     NotFound:
-      description: Resource not found.
+      description: Resource not found, or hidden from the caller's authorization scope.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     Conflict:
-      description: State conflict (duplicate, lifecycle, or version).
+      description: >
+        State conflict — duplicate id, illegal lifecycle transition, version
+        conflict, or attempt to acknowledge/resolve an alert in a wrong state.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     UnprocessableEntity:
-      description: Well-formed but semantically invalid.
+      description: >
+        Well-formed but semantically invalid — failed validation, broken
+        invariants (e.g. sensor without `parentGatewayId`), or scope/window
+        constraints (e.g. unbounded telemetry/audit query).
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     TooManyRequests:
-      description: Rate limit exceeded.
+      description: >
+        Rate limit exceeded. Includes `Retry-After` and `RateLimit-*`
+        headers. Per limits — User 100/min, Device 300/min, Auth 20/min.
       headers:
         Retry-After: { $ref: '#/components/headers/RetryAfter' }
       content:
@@ -1081,15 +1374,19 @@ components:
     # ----- shared / enums
     ProblemDetail:
       type: object
-      description: RFC 9457 Problem Details.
+      description: >
+        RFC 9457 Problem Details. `type` (stable, machine-readable URI) and
+        `status` drive client branching; `detail` is human-facing and may
+        change. Validation failures list every offending field in `errors`.
       properties:
-        type: { type: string, format: uri }
-        title: { type: string }
-        status: { type: integer }
-        detail: { type: string }
-        instance: { type: string }
+        type: { type: string, format: uri, description: "Stable, machine-readable error type URI." }
+        title: { type: string, description: Short human-readable summary. }
+        status: { type: integer, description: HTTP status code. }
+        detail: { type: string, description: Human-readable detail; may change between releases. }
+        instance: { type: string, description: URI reference identifying the specific occurrence. }
         errors:
           type: array
+          description: Per-field validation failures (present on `422` typically).
           items: { $ref: '#/components/schemas/FieldError' }
     FieldError:
       type: object
@@ -1098,39 +1395,68 @@ components:
         message: { type: string }
     CursorPage:
       type: object
+      description: >
+        Pagination metadata for cursor-based collections (telemetry,
+        commands, alerts, audit-logs). `nextCursor` is opaque.
       properties:
-        nextCursor: { type: string, nullable: true }
+        nextCursor: { type: string, nullable: true, description: Pass to next request; null when exhausted. }
         hasMore: { type: boolean }
         pageSize: { type: integer }
     OffsetPage:
       type: object
+      description: >
+        Pagination metadata for offset-based collections (devices, users,
+        rules, sensors). Includes total count for table UIs.
       properties:
         offset: { type: integer }
         limit: { type: integer }
         total: { type: integer }
     Role:
       type: string
+      description: >
+        Hierarchical role. `SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`.
+        `SUPER_ADMIN` may grant `ADMIN`/`SUPER_ADMIN`; `ADMIN` manages
+        `OPERATOR`/`VIEWER`.
       enum: [SUPER_ADMIN, ADMIN, OPERATOR, VIEWER]
     UserStatus:
       type: string
+      description: >
+        `ACTIVE` users may authenticate; `DISABLED` is the soft-delete
+        terminal state (set by `DELETE /users/{userId}`).
       enum: [ACTIVE, DISABLED]
     DeviceCategory:
       type: string
+      description: >
+        `gateway` aggregates child sensors and brokers MQTT; `sensor` is a
+        leaf producer (parented by a gateway); `actuator` accepts commands.
       enum: [gateway, sensor, actuator]
     DeviceStatus:
       type: string
+      description: >
+        Lifecycle state. Transitions are driven by explicit named actions
+        (`:activate`, `:suspend`, `:decommission`). `DECOMMISSIONED` is
+        terminal.
       enum: [ACTIVE, INACTIVE, SUSPENDED, DECOMMISSIONED]
     CommandStatus:
       type: string
+      description: >
+        Command lifecycle. `PENDING` on issue, `RECEIVED` on device receipt
+        ack (MQTT), `SUCCESS` / `FAILED` on execution ack, `TIMEOUT` if no
+        ack within the configured window.
       enum: [PENDING, RECEIVED, SUCCESS, FAILED, TIMEOUT]
     AlertStatus:
       type: string
+      description: Alert lifecycle; driven by explicit acknowledge / resolve actions.
       enum: [OPEN, ACK, RESOLVED]
     Severity:
       type: string
       enum: [INFO, WARNING, CRITICAL]
     ActorType:
       type: string
+      description: >
+        Origin of an audit event. `USER` for operator JWT actions, `DEVICE`
+        for device-token actions, `SYSTEM` for engine-triggered actions
+        (rule engine, sweeper).
       enum: [USER, DEVICE, SYSTEM]
 
     # ----- auth
@@ -1139,41 +1465,44 @@ components:
       required: [username, password]
       properties:
         username: { type: string }
-        password: { type: string, format: password }
+        password: { type: string, format: password, description: Plaintext only on the wire over TLS; never logged. }
     RefreshRequest:
       type: object
       required: [refreshToken]
       properties:
-        refreshToken: { type: string }
+        refreshToken: { type: string, description: Rotating refresh token previously issued. Single-use — server rotates on accept. }
     TokenResponse:
       type: object
+      description: User access + rotating refresh token pair, plus role for client routing.
       properties:
-        accessToken: { type: string }
+        accessToken: { type: string, description: "Short-lived JWT (1 h). Send as `Authorization: Bearer ...`." }
         tokenType: { type: string, example: Bearer }
-        expiresIn: { type: integer, example: 3600 }
-        refreshToken: { type: string }
+        expiresIn: { type: integer, example: 3600, description: Seconds until `accessToken` expires. }
+        refreshToken: { type: string, description: New rotating refresh token (30-day expiry); replaces any prior token. }
         role: { $ref: '#/components/schemas/Role' }
     DeviceTokenRequest:
       type: object
+      description: Standard OAuth2 client-credentials grant body (form-encoded).
       required: [grant_type, client_id, client_secret]
       properties:
         grant_type: { type: string, enum: [client_credentials] }
         client_id: { type: string }
         client_secret: { type: string }
-        scope: { type: string, description: Space-delimited requested scopes. }
+        scope: { type: string, description: Space-delimited requested scopes. Granted set is the intersection with the device's stored scopes. }
     DeviceTokenResponse:
       type: object
       properties:
         access_token: { type: string }
         token_type: { type: string, example: Bearer }
-        expires_in: { type: integer }
-        scope: { type: string }
+        expires_in: { type: integer, description: Seconds until expiry. }
+        scope: { type: string, description: Space-delimited granted scopes (may be narrower than requested). }
 
     # ----- users
     User:
       type: object
+      description: Operator account. Note the deliberate absence of `passwordHash` on the wire.
       properties:
-        id: { type: string }
+        id: { type: string, description: Opaque user id (e.g. `usr_8f3a`). }
         username: { type: string }
         role: { $ref: '#/components/schemas/Role' }
         status: { $ref: '#/components/schemas/UserStatus' }
@@ -1183,10 +1512,11 @@ components:
       required: [username, password, role]
       properties:
         username: { type: string }
-        password: { type: string, format: password }
+        password: { type: string, format: password, description: Plaintext only on the wire over TLS; never logged or returned. }
         role: { $ref: '#/components/schemas/Role' }
     UpdateUserRequest:
       type: object
+      description: Partial update; both fields are optional but at least one must be present.
       properties:
         role: { $ref: '#/components/schemas/Role' }
         status: { $ref: '#/components/schemas/UserStatus' }
@@ -1195,60 +1525,72 @@ components:
     Device:
       type: object
       properties:
-        deviceId: { type: string }
+        deviceId: { type: string, description: Caller-supplied stable identifier (e.g. `gw_office1_01`). }
         category: { $ref: '#/components/schemas/DeviceCategory' }
-        deviceType: { type: string, example: temp }
-        zone: { type: string }
-        parentGatewayId: { type: string, nullable: true }
+        deviceType: { type: string, example: temp, description: "Free-form sub-type (e.g. `temp`, `smoke`, `exhaust`)." }
+        zone: { type: string, description: Logical placement (e.g. `office_1`). }
+        parentGatewayId: { type: string, nullable: true, description: "For sensors, the parenting gateway's `deviceId`. Null for gateways and actuators." }
         firmwareVersion: { type: string }
         status: { $ref: '#/components/schemas/DeviceStatus' }
         protocols:
           type: array
+          description: Supported wire protocols (e.g. `mqtt`, `http`).
           items: { type: string }
         createdAt: { type: string, format: date-time }
     RegisterDeviceRequest:
       type: object
       required: [deviceId, category, deviceType, zone]
       properties:
-        deviceId: { type: string }
+        deviceId: { type: string, description: Must be unique. Duplicate → `409`. }
         category: { $ref: '#/components/schemas/DeviceCategory' }
         deviceType: { type: string }
         zone: { type: string }
-        parentGatewayId: { type: string, nullable: true, description: Required when category is sensor. }
+        parentGatewayId: { type: string, nullable: true, description: Required when `category` is `sensor`. Missing or invalid → `422`. }
         firmwareVersion: { type: string }
         protocols:
           type: array
           items: { type: string }
     UpdateDeviceRequest:
       type: object
+      description: >
+        Partial update of mutable metadata. Status is **not** patchable here
+        — use the lifecycle action endpoints.
       properties:
         zone: { type: string }
         deviceType: { type: string }
         firmwareVersion: { type: string }
     Sensor:
       type: object
+      description: Sensor view as returned by the gateway's sensor list.
       properties:
         sensorId: { type: string }
         gatewayId: { type: string }
-        type: { type: string }
+        type: { type: string, description: "Sensor sub-type (e.g. `temp`, `smoke`)." }
         zone: { type: string }
 
     # ----- credentials & scopes
     CredentialSecret:
       type: object
-      description: Returned exactly once on issue/rotation.
+      description: >
+        Returned **exactly once** on issue / rotation. Persist immediately;
+        the API will never re-emit the secret. If lost, call
+        `:rotate` to mint a new one.
       properties:
         clientId: { type: string }
         clientSecret: { type: string, description: Shown once; reissue or rotate if lost. }
         rotatedAt: { type: string, format: date-time }
-        graceExpiresAt: { type: string, format: date-time, nullable: true }
+        graceExpiresAt: { type: string, format: date-time, nullable: true, description: "While non-null, the previous secret remains valid until this timestamp." }
     CredentialMetadata:
       type: object
+      description: Safe metadata view — never includes the client secret.
       properties:
         clientId: { type: string }
         rotatedAt: { type: string, format: date-time }
     ScopeSet:
       type: object
+      description: >
+        Full scope set granted to a device's stored credential. Tokens minted
+        via `/oauth2/token` intersect requested scopes against this set.
       required: [scopes]
       properties:
         scopes:
@@ -1260,19 +1602,24 @@ components:
     # ----- telemetry
     TelemetryReadingInput:
       type: object
+      description: >
+        One reading. Exactly one of `valueNum` / `valueBool` must be present
+        — numeric sensors set `valueNum` (with optional `unit`); boolean
+        sensors set `valueBool`. Mixing both → `422`.
       required: [sensorId, sensorType, ts]
       properties:
         sensorId: { type: string }
         sensorType: { type: string }
         valueNum: { type: number, format: double, nullable: true, description: Present for numeric sensors. }
         valueBool: { type: boolean, nullable: true, description: Present for boolean sensors. }
-        unit: { type: string, nullable: true }
-        ts: { type: string, format: date-time }
+        unit: { type: string, nullable: true, description: "SI unit for numeric readings (e.g. `C`, `%`)." }
+        ts: { type: string, format: date-time, description: "Device-side capture timestamp (ISO-8601 UTC). Retained as capture time, but the server also stamps its own ingest timestamp; implausible skew (future-dated or far-past) is rejected as stale-replay → `422`." }
     TelemetryBatch:
       type: object
+      description: Batch payload for the HTTP fallback ingest. Mirrors the MQTT telemetry envelope.
       required: [gatewayId, zone, readings]
       properties:
-        gatewayId: { type: string }
+        gatewayId: { type: string, description: "Must equal the authenticated device identity (not merely a registered gateway); a mismatch → `403`." }
         zone: { type: string }
         readings:
           type: array
@@ -1292,6 +1639,9 @@ components:
     # ----- current state / health
     CurrentStateItem:
       type: object
+      description: >
+        Latest known reading for one sensor, served from `sensor_latest`.
+        May lag the freshest sample by one (eventual consistency).
       properties:
         sensorId: { type: string }
         zone: { type: string }
@@ -1299,57 +1649,74 @@ components:
         valueNum: { type: number, format: double, nullable: true }
         valueBool: { type: boolean, nullable: true }
         unit: { type: string, nullable: true }
-        ts: { type: string, format: date-time }
+        ts: { type: string, format: date-time, description: Timestamp on the underlying reading (not when this row was written). }
     DeviceHealth:
       type: object
+      description: Single-row health view; the latest known health record (no history).
       properties:
         deviceId: { type: string }
-        connectionStatus: { type: string, enum: [ONLINE, OFFLINE] }
-        lastSeen: { type: string, format: date-time }
-        memoryUsagePct: { type: integer }
-        cpuUsagePct: { type: integer }
-        wifiRssi: { type: integer }
+        connectionStatus: { type: string, enum: [ONLINE, OFFLINE], description: Derived from heartbeat / LWT presence. }
+        lastSeen: { type: string, format: date-time, description: Last heartbeat or telemetry timestamp. }
+        memoryUsagePct: { type: integer, minimum: 0, maximum: 100 }
+        cpuUsagePct: { type: integer, minimum: 0, maximum: 100 }
+        wifiRssi: { type: integer, description: Signal strength in dBm (negative — closer to 0 is stronger). }
         updatedAt: { type: string, format: date-time }
     ConnectivitySummary:
       type: object
+      description: Aggregated online/offline counts plus a bounded sample of offline `deviceId`s.
       properties:
         online: { type: integer }
         offline: { type: integer }
         total: { type: integer }
         offlineDevices:
           type: array
+          description: Bounded list of offline device ids; large fleets should drill in per-device.
           items: { type: string }
 
     # ----- heartbeat
     HeartbeatRequest:
       type: object
+      description: >
+        Health upsert. `deviceId` must match the authenticated device
+        identity (a device cannot report on behalf of another); mismatch →
+        `403`.
       required: [deviceId]
       properties:
         deviceId: { type: string }
-        memoryUsagePct: { type: integer }
-        cpuUsagePct: { type: integer }
-        wifiRssi: { type: integer }
+        memoryUsagePct: { type: integer, minimum: 0, maximum: 100 }
+        cpuUsagePct: { type: integer, minimum: 0, maximum: 100 }
+        wifiRssi: { type: integer, description: Signal strength in dBm. }
 
     # ----- commands
     IssueCommandRequest:
       type: object
+      description: >
+        Idempotent state-set targeting an actuator. Use absolute states
+        (`SET status=ON`), not deltas (`TOGGLE`), so MQTT QoS-1 redeliveries
+        are harmless. `action` and `parameters` are **whitelisted** against
+        the actuator's contract (injection defense — no free-form passthrough
+        to the device); unknown actions/params, or targeting a non-actuator or
+        `DECOMMISSIONED` device → `422`.
       required: [targetId, type, action]
       properties:
-        targetId: { type: string }
+        targetId: { type: string, description: Actuator `deviceId`. }
         type: { type: string, example: actuator }
-        action: { type: string, example: SET }
+        action: { type: string, example: SET, description: Verb in the actuator's contract (typically `SET`). }
         parameters:
           type: object
           additionalProperties: true
+          description: Action arguments — shape per actuator contract.
           example: { status: ON }
     CommandAck:
       type: object
+      description: Response on issue. Status is always `PENDING` here — the actuator effect is async.
       properties:
         commandId: { type: string }
         status: { $ref: '#/components/schemas/CommandStatus' }
         issuedAt: { type: string, format: date-time }
     Command:
       type: object
+      description: Command record with full lifecycle timestamps. Poll for state changes.
       properties:
         commandId: { type: string }
         targetId: { type: string }
@@ -1361,22 +1728,27 @@ components:
         status: { $ref: '#/components/schemas/CommandStatus' }
         issuedBy: { type: string, description: "User id, rule id, or system." }
         issuedAt: { type: string, format: date-time }
-        receivedAt: { type: string, format: date-time, nullable: true }
-        executedAt: { type: string, format: date-time, nullable: true }
+        receivedAt: { type: string, format: date-time, nullable: true, description: Set when the device acks receipt (MQTT). }
+        executedAt: { type: string, format: date-time, nullable: true, description: Set when the device acks execution outcome (MQTT). }
 
     # ----- rules
     Rule:
       type: object
+      description: A rule evaluated asynchronously against telemetry/state by the rule engine.
       properties:
         ruleId: { type: string }
         name: { type: string }
         enabled: { type: boolean }
-        condition: { type: string, example: "office_1.smoke == true" }
-        action: { type: string, example: "command(act_exhaust_1, SET, {status: ON}); alert(SMOKE, CRITICAL)" }
-        priority: { type: integer }
-        createdBy: { type: string }
+        condition: { type: string, example: "office_1.smoke == true", description: Expression in the restricted grammar. }
+        action: { type: string, example: "command(act_exhaust_1, SET, {status: ON}); alert(SMOKE, CRITICAL)", description: "One or more semicolon-separated effects (`command(...)`, `alert(...)`)." }
+        priority: { type: integer, description: Higher priority rules evaluate first; deterministic for conflicting actions. }
+        createdBy: { type: string, description: "`userId` of the admin that authored the rule." }
     RuleInput:
       type: object
+      description: >
+        Create / replace payload. `condition` and `action` are validated on
+        write — unknown state references, disallowed syntax, or parse
+        failures → `422` with the offending token.
       required: [name, condition, action]
       properties:
         name: { type: string }
@@ -1386,6 +1758,7 @@ components:
         priority: { type: integer, default: 0 }
     RulePatch:
       type: object
+      description: Narrow patch for the common toggle / priority case.
       properties:
         enabled: { type: boolean }
         priority: { type: integer }
@@ -1393,12 +1766,15 @@ components:
     # ----- alerts
     Alert:
       type: object
+      description: >
+        An alert raised by a rule's `alert(...)` action. `status` transitions
+        are driven by `:acknowledge` / `:resolve`, not by direct write.
       properties:
         alertId: { type: string }
-        type: { type: string, example: SMOKE }
+        type: { type: string, example: SMOKE, description: "Caller-defined category (e.g. `SMOKE`, `OFFLINE`)." }
         severity: { $ref: '#/components/schemas/Severity' }
         zone: { type: string }
-        sourceDeviceId: { type: string }
+        sourceDeviceId: { type: string, description: Originating sensor / device id. }
         message: { type: string }
         status: { $ref: '#/components/schemas/AlertStatus' }
         createdAt: { type: string, format: date-time }
@@ -1406,14 +1782,18 @@ components:
     # ----- audit
     AuditLog:
       type: object
+      description: >
+        Append-only audit entry written internally by modules
+        (auth, device registry, credentials, rules, commands, RBAC).
       properties:
         id: { type: string }
         ts: { type: string, format: date-time }
-        actor: { type: string }
+        actor: { type: string, description: "Identifier of the actor — `userId`, `deviceId`, or `SYSTEM`." }
         actorType: { $ref: '#/components/schemas/ActorType' }
-        event: { type: string }
-        target: { type: string }
+        event: { type: string, description: "Stable event code (e.g. `USER_LOGIN`, `DEVICE_SUSPEND`, `CREDENTIAL_ROTATE`)." }
+        target: { type: string, description: "Affected resource id, when applicable." }
         detail:
           type: object
           additionalProperties: true
-        ip: { type: string }
+          description: Event-specific payload. Sensitive fields (secrets, passwords) are never present.
+        ip: { type: string, description: Source IP captured at the API boundary. }
