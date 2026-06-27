@@ -25,6 +25,16 @@ public enum AuditEvent {
   USER_DELETE("user.delete"),
   USER_PASSWORD_RESET("user.password-reset"),
 
+  // ---- registry / device lifecycle (Phase 3) ----------------------------------------
+  DEVICE_REGISTER("device.register"),
+  DEVICE_UPDATE("device.update"),
+  DEVICE_ACTIVATE("device.activate"),
+  DEVICE_SUSPEND("device.suspend"),
+  DEVICE_DECOMMISSION("device.decommission"),
+  DEVICE_CREDENTIAL_ISSUE("device.credential.issue"),
+  DEVICE_CREDENTIAL_ROTATE("device.credential.rotate"),
+  DEVICE_SCOPES_REPLACE("device.scopes.replace"),
+
   // ---- system (PartitionManager, retention sweeper, scheduled jobs) ------------------
   PARTITION_CREATED("partition.created"),
   PARTITION_DROPPED("partition.dropped");
