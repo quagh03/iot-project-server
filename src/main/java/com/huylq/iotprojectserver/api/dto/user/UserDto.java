@@ -10,14 +10,14 @@ import java.time.OffsetDateTime;
  * User wire shape. Deliberately omits {@code passwordHash}.
  */
 public record UserDto(
-        String id,
-        String username,
-        Role role,
-        User.Status status,
-        OffsetDateTime createdAt) {
+    String id,
+    String username,
+    Role role,
+    User.Status status,
+    OffsetDateTime createdAt) {
 
-    public static UserDto from(User u) {
-        return new UserDto(u.getId().toString(), u.getUsername(), u.getRole(), u.getStatus(),
-                u.getCreatedAt());
-    }
+  public static UserDto from(User u) {
+    return new UserDto(u.getId().toString(), u.getUsername(), u.getRole(), u.getStatus(),
+        u.getCreatedAt());
+  }
 }

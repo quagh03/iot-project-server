@@ -10,14 +10,14 @@ import java.util.List;
 
 public interface CommandRepository extends JpaRepository<Command, String>, JpaSpecificationExecutor<Command> {
 
-    List<Command> findByTarget_DeviceIdOrderByIssuedAtDesc(String targetId);
+  List<Command> findByTarget_DeviceIdOrderByIssuedAtDesc(String targetId);
 
-    @Query("""
-            SELECT c FROM Command c
-            WHERE c.status IN (
-                com.huylq.iotprojectserver.command.Command.Status.PENDING,
-                com.huylq.iotprojectserver.command.Command.Status.RECEIVED
-            ) AND c.issuedAt < :cutoff
-            """)
-    List<Command> findOpenIssuedBefore(@Param("cutoff") OffsetDateTime cutoff);
+  @Query("""
+      SELECT c FROM Command c
+      WHERE c.status IN (
+          com.huylq.iotprojectserver.command.Command.Status.PENDING,
+          com.huylq.iotprojectserver.command.Command.Status.RECEIVED
+      ) AND c.issuedAt < :cutoff
+      """)
+  List<Command> findOpenIssuedBefore(@Param("cutoff") OffsetDateTime cutoff);
 }

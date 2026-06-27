@@ -18,22 +18,24 @@ import java.util.stream.Collectors;
  * rendered by the global handler.
  */
 public record DeviceTokenRequest(
-        @NotBlank
-        @Pattern(regexp = "client_credentials", message = "unsupported grant_type")
-        String grant_type,
+    @NotBlank
+    @Pattern(regexp = "client_credentials", message = "unsupported grant_type")
+    String grant_type,
 
-        @NotBlank String client_id,
+    @NotBlank String client_id,
 
-        @NotBlank String client_secret,
+    @NotBlank String client_secret,
 
-        String scope) {
+    String scope) {
 
-    /** Space-delimited {@code scope} parsed into a set; empty when absent or blank. */
-    public Set<String> requestedScopes() {
-        if (scope == null || scope.isBlank()) {
-            return Set.of();
-        }
-        return Arrays.stream(scope.trim().split("\\s+"))
-                .collect(Collectors.toUnmodifiableSet());
+  /**
+   * Space-delimited {@code scope} parsed into a set; empty when absent or blank.
+   */
+  public Set<String> requestedScopes() {
+    if (scope == null || scope.isBlank()) {
+      return Set.of();
     }
+    return Arrays.stream(scope.trim().split("\\s+"))
+        .collect(Collectors.toUnmodifiableSet());
+  }
 }

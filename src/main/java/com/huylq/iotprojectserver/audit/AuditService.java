@@ -14,21 +14,23 @@ import java.util.Map;
  */
 public interface AuditService {
 
-    /** Generic append — caller specifies actor type explicitly. */
-    void append(String actor, AuditLog.ActorType actorType, AuditEvent event,
-                String target, Map<String, Object> detail, String ip);
+  /**
+   * Generic append — caller specifies actor type explicitly.
+   */
+  void append(String actor, AuditLog.ActorType actorType, AuditEvent event,
+              String target, Map<String, Object> detail, String ip);
 
-    default void user(String userId, AuditEvent event, String target,
-                      Map<String, Object> detail, String ip) {
-        append(userId, AuditLog.ActorType.USER, event, target, detail, ip);
-    }
+  default void user(String userId, AuditEvent event, String target,
+                    Map<String, Object> detail, String ip) {
+    append(userId, AuditLog.ActorType.USER, event, target, detail, ip);
+  }
 
-    default void device(String deviceId, AuditEvent event, String target,
-                        Map<String, Object> detail) {
-        append(deviceId, AuditLog.ActorType.DEVICE, event, target, detail, null);
-    }
+  default void device(String deviceId, AuditEvent event, String target,
+                      Map<String, Object> detail) {
+    append(deviceId, AuditLog.ActorType.DEVICE, event, target, detail, null);
+  }
 
-    default void system(AuditEvent event, String target, Map<String, Object> detail) {
-        append("system", AuditLog.ActorType.SYSTEM, event, target, detail, null);
-    }
+  default void system(AuditEvent event, String target, Map<String, Object> detail) {
+    append("system", AuditLog.ActorType.SYSTEM, event, target, detail, null);
+  }
 }

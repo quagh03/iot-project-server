@@ -6,7 +6,7 @@ import java.util.List;
 
 public interface DeviceScopeRepository extends JpaRepository<DeviceScope, DeviceScopeId> {
 
-    List<DeviceScope> findByDeviceId(String deviceId);
+  List<DeviceScope> findByDeviceId(String deviceId);
 
-    void deleteByDeviceId(String deviceId);
+  void deleteByDeviceId(String deviceId);
 }

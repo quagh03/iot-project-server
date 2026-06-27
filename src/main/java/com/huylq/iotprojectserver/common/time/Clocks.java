@@ -10,16 +10,19 @@ import java.time.ZoneOffset;
  */
 public final class Clocks {
 
-    private static volatile Clock clock = Clock.systemUTC();
+  private static volatile Clock clock = Clock.systemUTC();
 
-    private Clocks() {}
+  private Clocks() {
+  }
 
-    public static OffsetDateTime nowUtc() {
-        return OffsetDateTime.now(clock).withOffsetSameInstant(ZoneOffset.UTC);
-    }
+  public static OffsetDateTime nowUtc() {
+    return OffsetDateTime.now(clock).withOffsetSameInstant(ZoneOffset.UTC);
+  }
 
-    /** Test seam — production code should never call this. */
-    public static void setClock(Clock c) {
-        clock = c;
-    }
+  /**
+   * Test seam — production code should never call this.
+   */
+  public static void setClock(Clock c) {
+    clock = c;
+  }
 }

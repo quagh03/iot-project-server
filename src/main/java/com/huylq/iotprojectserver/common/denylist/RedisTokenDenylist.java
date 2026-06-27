@@ -20,29 +20,29 @@ import java.time.Duration;
 @RequiredArgsConstructor
 public class RedisTokenDenylist implements TokenDenylist {
 
-    private static final String JTI_PREFIX = "denylist:jti:";
-    private static final String REFRESH_PREFIX = "denylist:refresh:";
-    private static final String DENIED = "1";
+  private static final String JTI_PREFIX = "denylist:jti:";
+  private static final String REFRESH_PREFIX = "denylist:refresh:";
+  private static final String DENIED = "1";
 
-    private final StringRedisTemplate redis;
+  private final StringRedisTemplate redis;
 
-    @Override
-    public void blacklistAccessJti(String jti, Duration ttl) {
-        redis.opsForValue().set(JTI_PREFIX + jti, DENIED, ttl);
-    }
+  @Override
+  public void blacklistAccessJti(String jti, Duration ttl) {
+    redis.opsForValue().set(JTI_PREFIX + jti, DENIED, ttl);
+  }
 
-    @Override
-    public void blacklistRefreshHash(String hash, Duration ttl) {
-        redis.opsForValue().set(REFRESH_PREFIX + hash, DENIED, ttl);
-    }
+  @Override
+  public void blacklistRefreshHash(String hash, Duration ttl) {
+    redis.opsForValue().set(REFRESH_PREFIX + hash, DENIED, ttl);
+  }
 
-    @Override
-    public boolean isAccessBlacklisted(String jti) {
-        return jti != null && Boolean.TRUE.equals(redis.hasKey(JTI_PREFIX + jti));
-    }
+  @Override
+  public boolean isAccessBlacklisted(String jti) {
+    return jti != null && Boolean.TRUE.equals(redis.hasKey(JTI_PREFIX + jti));
+  }
 
-    @Override
-    public boolean isRefreshBlacklisted(String hash) {
-        return hash != null && Boolean.TRUE.equals(redis.hasKey(REFRESH_PREFIX + hash));
-    }
+  @Override
+  public boolean isRefreshBlacklisted(String hash) {
+    return hash != null && Boolean.TRUE.equals(redis.hasKey(REFRESH_PREFIX + hash));
+  }
 }

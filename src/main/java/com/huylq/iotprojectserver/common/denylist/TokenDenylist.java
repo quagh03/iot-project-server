@@ -20,11 +20,11 @@ import java.time.Duration;
  */
 public interface TokenDenylist {
 
-    void blacklistAccessJti(String jti, Duration ttl);
+  void blacklistAccessJti(String jti, Duration ttl);
 
-    void blacklistRefreshHash(String hash, Duration ttl);
+  void blacklistRefreshHash(String hash, Duration ttl);
 
-    boolean isAccessBlacklisted(String jti);
+  boolean isAccessBlacklisted(String jti);
 
-    boolean isRefreshBlacklisted(String hash);
+  boolean isRefreshBlacklisted(String hash);
 }

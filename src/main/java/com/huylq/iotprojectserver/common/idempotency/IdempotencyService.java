@@ -34,56 +34,58 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class IdempotencyService {
 
-    private final IdempotencyKeyRepository repo;
-    private final IdempotencyConfig config;
+  private final IdempotencyKeyRepository repo;
+  private final IdempotencyConfig config;
 
-    @Transactional(readOnly = true)
-    public IdempotencyResult lookup(UUID key, String endpoint, String requestBody) {
-        String hash = sha256Hex(requestBody);
-        Optional<IdempotencyKey> existing = repo.findById(new IdempotencyKeyId(key, endpoint));
-        if (existing.isEmpty()) return IdempotencyResult.fresh();
+  @Transactional(readOnly = true)
+  public IdempotencyResult lookup(UUID key, String endpoint, String requestBody) {
+    String hash = sha256Hex(requestBody);
+    Optional<IdempotencyKey> existing = repo.findById(new IdempotencyKeyId(key, endpoint));
+    if (existing.isEmpty()) return IdempotencyResult.fresh();
 
-        IdempotencyKey row = existing.get();
-        if (!row.getRequestHash().equals(hash)) return IdempotencyResult.conflict();
-        return IdempotencyResult.replay(row.getResponseStatus(), row.getResponseBody());
+    IdempotencyKey row = existing.get();
+    if (!row.getRequestHash().equals(hash)) return IdempotencyResult.conflict();
+    return IdempotencyResult.replay(row.getResponseStatus(), row.getResponseBody());
+  }
+
+  @Transactional
+  public void store(UUID key, String endpoint, String requestBody,
+                    short responseStatus, Map<String, Object> responseBody) {
+    OffsetDateTime now = OffsetDateTime.now();
+    IdempotencyKey row = IdempotencyKey.builder()
+        .idempotencyKey(key)
+        .endpoint(endpoint)
+        .requestHash(sha256Hex(requestBody))
+        .responseStatus(responseStatus)
+        .responseBody(responseBody)
+        .expiresAt(now.plusHours(config.ttlHours()))
+        .build();
+    try {
+      repo.save(row);
+    } catch (DataIntegrityViolationException raceLost) {
+      // A concurrent request stored the same key first — the existing row wins.
+      log.debug("Lost idempotency-store race for key {} on {}", key, endpoint);
     }
+  }
 
-    @Transactional
-    public void store(UUID key, String endpoint, String requestBody,
-                      short responseStatus, Map<String, Object> responseBody) {
-        OffsetDateTime now = OffsetDateTime.now();
-        IdempotencyKey row = IdempotencyKey.builder()
-                .idempotencyKey(key)
-                .endpoint(endpoint)
-                .requestHash(sha256Hex(requestBody))
-                .responseStatus(responseStatus)
-                .responseBody(responseBody)
-                .expiresAt(now.plusHours(config.ttlHours()))
-                .build();
-        try {
-            repo.save(row);
-        } catch (DataIntegrityViolationException raceLost) {
-            // A concurrent request stored the same key first — the existing row wins.
-            log.debug("Lost idempotency-store race for key {} on {}", key, endpoint);
-        }
-    }
+  /**
+   * Prune expired rows hourly. The partial index on (expires_at) keeps the scan tiny.
+   */
+  @Scheduled(fixedDelayString = "PT1H")
+  @Transactional
+  public void pruneExpired() {
+    int removed = repo.deleteExpired(OffsetDateTime.now());
+    if (removed > 0) log.info("Pruned {} expired idempotency keys", removed);
+  }
 
-    /** Prune expired rows hourly. The partial index on (expires_at) keeps the scan tiny. */
-    @Scheduled(fixedDelayString = "PT1H")
-    @Transactional
-    public void pruneExpired() {
-        int removed = repo.deleteExpired(OffsetDateTime.now());
-        if (removed > 0) log.info("Pruned {} expired idempotency keys", removed);
+  private static String sha256Hex(String body) {
+    if (body == null) body = "";
+    try {
+      MessageDigest md = MessageDigest.getInstance("SHA-256");
+      byte[] digest = md.digest(body.getBytes(StandardCharsets.UTF_8));
+      return HexFormat.of().formatHex(digest);
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 unavailable", e);
     }
-
-    private static String sha256Hex(String body) {
-        if (body == null) body = "";
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(body.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 unavailable", e);
-        }
-    }
+  }
 }

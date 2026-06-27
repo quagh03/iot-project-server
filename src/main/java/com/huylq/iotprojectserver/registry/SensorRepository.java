@@ -6,7 +6,7 @@ import java.util.List;
 
 public interface SensorRepository extends JpaRepository<Sensor, String> {
 
-    List<Sensor> findByGateway_DeviceId(String gatewayId);
+  List<Sensor> findByGateway_DeviceId(String gatewayId);
 
-    List<Sensor> findByZone(String zone);
+  List<Sensor> findByZone(String zone);
 }

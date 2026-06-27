@@ -23,21 +23,21 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class DeviceTokenController {
 
-    private final DeviceTokenService deviceTokenService;
+  private final DeviceTokenService deviceTokenService;
 
-    @PostMapping(consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE)
-    public ResponseEntity<DeviceTokenResponse> token(@Valid DeviceTokenRequest request) {
-        DeviceTokenService.DeviceTokenResult result =
-                deviceTokenService.mint(request.client_id(), request.client_secret(),
-                        request.requestedScopes());
+  @PostMapping(consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE)
+  public ResponseEntity<DeviceTokenResponse> token(@Valid DeviceTokenRequest request) {
+    DeviceTokenService.DeviceTokenResult result =
+        deviceTokenService.mint(request.client_id(), request.client_secret(),
+            request.requestedScopes());
 
-        DeviceTokenResponse tokenResponse = DeviceTokenResponse.builder()
-            .accessToken(result.accessToken())
-            .tokenType("Bearer")
-            .expiresIn(result.expiresInSeconds())
-            .scope(String.join(" ", result.grantedScopes()))
-            .build();
+    DeviceTokenResponse tokenResponse = DeviceTokenResponse.builder()
+        .accessToken(result.accessToken())
+        .tokenType("Bearer")
+        .expiresIn(result.expiresInSeconds())
+        .scope(String.join(" ", result.grantedScopes()))
+        .build();
 
-        return ResponseEntity.ok(tokenResponse);
-    }
+    return ResponseEntity.ok(tokenResponse);
+  }
 }

@@ -28,46 +28,46 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class JwtService {
 
-    public static final String TYPE_USER = "USER";
-    public static final String TYPE_DEVICE = "DEVICE";
+  public static final String TYPE_USER = "USER";
+  public static final String TYPE_DEVICE = "DEVICE";
 
-    private final JwtEncoder encoder;
-    private final JwtConfig config;
+  private final JwtEncoder encoder;
+  private final JwtConfig config;
 
-    public String issueUserAccessToken(String userId, String role) {
-        Instant now = Clocks.nowUtc().toInstant();
-        JwtClaimsSet claims = JwtClaimsSet.builder()
-                .issuer(config.issuer())
-                .id(UUID.randomUUID().toString())   // jti — needed for denylist revocation
-                .issuedAt(now)
-                .expiresAt(now.plus(config.accessTokenTtl()))
-                .subject(userId)
-                .claim("typ", TYPE_USER)
-                .claim("role", role)
-                .build();
-        return encode(claims);
-    }
+  public String issueUserAccessToken(String userId, String role) {
+    Instant now = Clocks.nowUtc().toInstant();
+    JwtClaimsSet claims = JwtClaimsSet.builder()
+        .issuer(config.issuer())
+        .id(UUID.randomUUID().toString())   // jti — needed for denylist revocation
+        .issuedAt(now)
+        .expiresAt(now.plus(config.accessTokenTtl()))
+        .subject(userId)
+        .claim("typ", TYPE_USER)
+        .claim("role", role)
+        .build();
+    return encode(claims);
+  }
 
-    public String issueDeviceToken(String deviceId, Collection<String> grantedScopes) {
-        Instant now = Clocks.nowUtc().toInstant();
-        JwtClaimsSet claims = JwtClaimsSet.builder()
-                .issuer(config.issuer())
-                .id(UUID.randomUUID().toString())
-                .issuedAt(now)
-                .expiresAt(now.plus(config.deviceTokenTtl()))
-                .subject(deviceId)
-                .claim("typ", TYPE_DEVICE)
-                .claim("scope", String.join(" ", grantedScopes))
-                .build();
-        return encode(claims);
-    }
+  public String issueDeviceToken(String deviceId, Collection<String> grantedScopes) {
+    Instant now = Clocks.nowUtc().toInstant();
+    JwtClaimsSet claims = JwtClaimsSet.builder()
+        .issuer(config.issuer())
+        .id(UUID.randomUUID().toString())
+        .issuedAt(now)
+        .expiresAt(now.plus(config.deviceTokenTtl()))
+        .subject(deviceId)
+        .claim("typ", TYPE_DEVICE)
+        .claim("scope", String.join(" ", grantedScopes))
+        .build();
+    return encode(claims);
+  }
 
-    public Map<String, Object> peekClaims(String token) {
-        return Map.of(); // not used here; verification goes through the JwtDecoder bean
-    }
+  public Map<String, Object> peekClaims(String token) {
+    return Map.of(); // not used here; verification goes through the JwtDecoder bean
+  }
 
-    private String encode(JwtClaimsSet claims) {
-        JwsHeader header = JwsHeader.with(() -> "HS256").build();
-        return encoder.encode(JwtEncoderParameters.from(header, claims)).getTokenValue();
-    }
+  private String encode(JwtClaimsSet claims) {
+    JwsHeader header = JwsHeader.with(() -> "HS256").build();
+    return encoder.encode(JwtEncoderParameters.from(header, claims)).getTokenValue();
+  }
 }

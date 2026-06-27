@@ -15,9 +15,9 @@ import java.util.List;
 @ConfigurationProperties("iot.partitioning")
 public record PartitionConfig(List<String> tables, int retentionMonths, boolean dryRun) {
 
-    public PartitionConfig {
-        if (tables == null || tables.isEmpty()) {
-            tables = List.of("telemetry", "audit_logs");
-        }
+  public PartitionConfig {
+    if (tables == null || tables.isEmpty()) {
+      tables = List.of("telemetry", "audit_logs");
     }
+  }
 }

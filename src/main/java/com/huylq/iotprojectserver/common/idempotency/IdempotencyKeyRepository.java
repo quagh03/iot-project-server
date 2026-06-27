@@ -9,7 +9,7 @@ import java.time.OffsetDateTime;
 
 public interface IdempotencyKeyRepository extends JpaRepository<IdempotencyKey, IdempotencyKeyId> {
 
-    @Modifying
-    @Query("DELETE FROM IdempotencyKey k WHERE k.expiresAt < :cutoff")
-    int deleteExpired(@Param("cutoff") OffsetDateTime cutoff);
+  @Modifying
+  @Query("DELETE FROM IdempotencyKey k WHERE k.expiresAt < :cutoff")
+  int deleteExpired(@Param("cutoff") OffsetDateTime cutoff);
 }

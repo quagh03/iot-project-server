@@ -13,17 +13,17 @@ import java.util.Map;
  */
 public record IdempotencyResult(Kind kind, Short responseStatus, Map<String, Object> responseBody) {
 
-    public enum Kind { FRESH, REPLAY, CONFLICT }
+  public enum Kind {FRESH, REPLAY, CONFLICT}
 
-    public static IdempotencyResult fresh() {
-        return new IdempotencyResult(Kind.FRESH, null, null);
-    }
+  public static IdempotencyResult fresh() {
+    return new IdempotencyResult(Kind.FRESH, null, null);
+  }
 
-    public static IdempotencyResult replay(Short status, Map<String, Object> body) {
-        return new IdempotencyResult(Kind.REPLAY, status, body);
-    }
+  public static IdempotencyResult replay(Short status, Map<String, Object> body) {
+    return new IdempotencyResult(Kind.REPLAY, status, body);
+  }
 
-    public static IdempotencyResult conflict() {
-        return new IdempotencyResult(Kind.CONFLICT, null, null);
-    }
+  public static IdempotencyResult conflict() {
+    return new IdempotencyResult(Kind.CONFLICT, null, null);
+  }
 }

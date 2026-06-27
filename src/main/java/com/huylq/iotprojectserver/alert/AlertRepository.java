@@ -7,5 +7,5 @@ import java.util.List;
 
 public interface AlertRepository extends JpaRepository<Alert, Long>, JpaSpecificationExecutor<Alert> {
 
-    List<Alert> findByStatusOrderByCreatedAtDesc(Alert.Status status);
+  List<Alert> findByStatusOrderByCreatedAtDesc(Alert.Status status);
 }

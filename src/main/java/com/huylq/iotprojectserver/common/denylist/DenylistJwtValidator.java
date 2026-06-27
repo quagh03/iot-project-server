@@ -15,15 +15,15 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class DenylistJwtValidator implements OAuth2TokenValidator<Jwt> {
 
-    private final TokenDenylist denylist;
+  private final TokenDenylist denylist;
 
-    @Override
-    public OAuth2TokenValidatorResult validate(Jwt token) {
-        String jti = token.getId();
-        if (jti != null && denylist.isAccessBlacklisted(jti)) {
-            return OAuth2TokenValidatorResult.failure(new OAuth2Error(
-                    "invalid_token", "Token has been revoked", null));
-        }
-        return OAuth2TokenValidatorResult.success();
+  @Override
+  public OAuth2TokenValidatorResult validate(Jwt token) {
+    String jti = token.getId();
+    if (jti != null && denylist.isAccessBlacklisted(jti)) {
+      return OAuth2TokenValidatorResult.failure(new OAuth2Error(
+          "invalid_token", "Token has been revoked", null));
     }
+    return OAuth2TokenValidatorResult.success();
+  }
 }

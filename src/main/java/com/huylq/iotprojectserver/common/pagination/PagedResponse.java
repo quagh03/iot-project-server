@@ -8,11 +8,11 @@ import java.util.List;
  */
 public record PagedResponse<T>(List<T> data, Object page) {
 
-    public static <T> PagedResponse<T> cursor(List<T> data, CursorPage page) {
-        return new PagedResponse<>(data, page);
-    }
+  public static <T> PagedResponse<T> cursor(List<T> data, CursorPage page) {
+    return new PagedResponse<>(data, page);
+  }
 
-    public static <T> PagedResponse<T> offset(List<T> data, OffsetPage page) {
-        return new PagedResponse<>(data, page);
-    }
+  public static <T> PagedResponse<T> offset(List<T> data, OffsetPage page) {
+    return new PagedResponse<>(data, page);
+  }
 }

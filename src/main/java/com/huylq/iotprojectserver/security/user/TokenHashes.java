@@ -11,15 +11,16 @@ import java.util.HexFormat;
  */
 final class TokenHashes {
 
-    private TokenHashes() {}
+  private TokenHashes() {
+  }
 
-    static String sha256(String raw) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(raw.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
+  static String sha256(String raw) {
+    try {
+      byte[] digest = MessageDigest.getInstance("SHA-256")
+          .digest(raw.getBytes(StandardCharsets.UTF_8));
+      return HexFormat.of().formatHex(digest);
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException(e);
     }
+  }
 }

@@ -6,5 +6,5 @@ import java.util.Optional;
 
 public interface DeviceCredentialRepository extends JpaRepository<DeviceCredential, String> {
 
-    Optional<DeviceCredential> findByClientId(String clientId);
+  Optional<DeviceCredential> findByClientId(String clientId);
 }

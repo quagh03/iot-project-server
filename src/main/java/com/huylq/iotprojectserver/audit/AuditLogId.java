@@ -1,6 +1,10 @@
 package com.huylq.iotprojectserver.audit;
 
-import lombok.*;
+import lombok.AllArgsConstructor;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 
 import java.io.Serializable;
 import java.time.OffsetDateTime;
@@ -12,6 +16,6 @@ import java.time.OffsetDateTime;
 @EqualsAndHashCode
 public class AuditLogId implements Serializable {
 
-    private Long id;
-    private OffsetDateTime ts;
+  private Long id;
+  private OffsetDateTime ts;
 }

@@ -22,14 +22,16 @@ package com.huylq.iotprojectserver.security;
  * </ol>
  */
 public enum Role {
-    SUPER_ADMIN,
-    ADMIN,
-    OPERATOR,
-    TECHNICIAN,
-    VIEWER;
+  SUPER_ADMIN,
+  ADMIN,
+  OPERATOR,
+  TECHNICIAN,
+  VIEWER;
 
-    /** Spring authority name, e.g. {@code "ROLE_ADMIN"}. */
-    public String authority() {
-        return "ROLE_" + name();
-    }
+  /**
+   * Spring authority name, e.g. {@code "ROLE_ADMIN"}.
+   */
+  public String authority() {
+    return "ROLE_" + name();
+  }
 }

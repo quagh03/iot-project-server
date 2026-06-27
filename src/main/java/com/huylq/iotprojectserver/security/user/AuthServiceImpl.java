@@ -29,131 +29,131 @@ import java.util.UUID;
 @RequiredArgsConstructor
 class AuthServiceImpl implements AuthService {
 
-    private final UserRepository userRepo;
-    private final RefreshTokenRepository refreshRepo;
-    private final PasswordEncoder passwordEncoder;
-    private final JwtService jwtService;
-    private final JwtConfig jwtConfig;
-    private final AuditService audit;
-    private final TokenDenylist denylist;
+  private final UserRepository userRepo;
+  private final RefreshTokenRepository refreshRepo;
+  private final PasswordEncoder passwordEncoder;
+  private final JwtService jwtService;
+  private final JwtConfig jwtConfig;
+  private final AuditService audit;
+  private final TokenDenylist denylist;
 
-    @Override
-    @Transactional
-    public IssuedTokens login(String username, String password, String ip) {
-        Optional<User> maybeUser = userRepo.findByUsername(username);
-        if (maybeUser.isEmpty() || maybeUser.get().getStatus() != User.Status.ACTIVE
-                || !passwordEncoder.matches(password, maybeUser.get().getPasswordHash())) {
-            // Identical 401 for all failure modes — never leak which side failed.
-            audit.append(username, AuditLog.ActorType.USER,
-                    AuditEvent.USER_LOGIN_FAILED, null, null, ip);
-            throw new ApiException(ErrorType.UNAUTHENTICATED, HttpStatus.UNAUTHORIZED, "Invalid credentials");
-        }
-        User user = maybeUser.get();
-        IssuedTokens tokens = issueTokens(user);
-        audit.user(user.getId().toString(), AuditEvent.USER_LOGIN, username, null, ip);
-        return tokens;
+  @Override
+  @Transactional
+  public IssuedTokens login(String username, String password, String ip) {
+    Optional<User> maybeUser = userRepo.findByUsername(username);
+    if (maybeUser.isEmpty() || maybeUser.get().getStatus() != User.Status.ACTIVE
+        || !passwordEncoder.matches(password, maybeUser.get().getPasswordHash())) {
+      // Identical 401 for all failure modes — never leak which side failed.
+      audit.append(username, AuditLog.ActorType.USER,
+          AuditEvent.USER_LOGIN_FAILED, null, null, ip);
+      throw new ApiException(ErrorType.UNAUTHENTICATED, HttpStatus.UNAUTHORIZED, "Invalid credentials");
+    }
+    User user = maybeUser.get();
+    IssuedTokens tokens = issueTokens(user);
+    audit.user(user.getId().toString(), AuditEvent.USER_LOGIN, username, null, ip);
+    return tokens;
+  }
+
+  @Override
+  @Transactional(noRollbackFor = ApiException.class)
+  public IssuedTokens refresh(String refreshToken, String ip) {
+    String hash = TokenHashes.sha256(refreshToken);
+
+    // Fast-deny path — Redis (or in-memory) denylist short-circuits the DB read.
+    // We still walk the chain (defense in depth) so any descendants get revoked too.
+    if (denylist.isRefreshBlacklisted(hash)) {
+      refreshRepo.findByTokenHash(hash).ifPresent(this::cascadeRevoke);
+      throw ApiException.tokenRevoked("Refresh token already used");
     }
 
-    @Override
-    @Transactional(noRollbackFor = ApiException.class)
-    public IssuedTokens refresh(String refreshToken, String ip) {
-        String hash = TokenHashes.sha256(refreshToken);
+    RefreshToken row = refreshRepo.findByTokenHash(hash)
+        .orElseThrow(() -> new ApiException(ErrorType.UNAUTHENTICATED,
+            HttpStatus.UNAUTHORIZED, "Refresh token not recognized"));
 
-        // Fast-deny path — Redis (or in-memory) denylist short-circuits the DB read.
-        // We still walk the chain (defense in depth) so any descendants get revoked too.
-        if (denylist.isRefreshBlacklisted(hash)) {
-            refreshRepo.findByTokenHash(hash).ifPresent(this::cascadeRevoke);
-            throw ApiException.tokenRevoked("Refresh token already used");
-        }
+    OffsetDateTime now = Clocks.nowUtc();
+    if (Boolean.TRUE.equals(row.getRevoked())) {
+      // Reuse of a revoked token signals a potentially compromised refresh chain.
+      // Cascade-revoke + denylist the chain so an attacker holding any of them loses it too.
+      cascadeRevoke(row);
+      audit.user(row.getUser().getId().toString(), AuditEvent.USER_TOKEN_REUSE_DETECTED,
+          null, Map.of("tokenId", row.getId().toString()), ip);
+      throw ApiException.tokenRevoked("Refresh token already used");
+    }
+    if (row.getExpiresAt().isBefore(now)) {
+      throw new ApiException(ErrorType.UNAUTHENTICATED, HttpStatus.UNAUTHORIZED, "Refresh token expired");
+    }
 
-        RefreshToken row = refreshRepo.findByTokenHash(hash)
-                .orElseThrow(() -> new ApiException(ErrorType.UNAUTHENTICATED,
-                        HttpStatus.UNAUTHORIZED, "Refresh token not recognized"));
+    User user = row.getUser();
+    IssuedTokens issued = issueTokens(user);
+    RefreshToken newRow = refreshRepo.findByTokenHash(TokenHashes.sha256(issued.refreshToken()))
+        .orElseThrow();
+    row.setRevoked(true);
+    row.setRotatedTo(newRow);
+    // The just-rotated token must never be replayed.
+    denylist.blacklistRefreshHash(row.getTokenHash(), remainingLifetime(row.getExpiresAt()));
 
-        OffsetDateTime now = Clocks.nowUtc();
-        if (Boolean.TRUE.equals(row.getRevoked())) {
-            // Reuse of a revoked token signals a potentially compromised refresh chain.
-            // Cascade-revoke + denylist the chain so an attacker holding any of them loses it too.
-            cascadeRevoke(row);
-            audit.user(row.getUser().getId().toString(), AuditEvent.USER_TOKEN_REUSE_DETECTED,
-                    null, Map.of("tokenId", row.getId().toString()), ip);
-            throw ApiException.tokenRevoked("Refresh token already used");
-        }
-        if (row.getExpiresAt().isBefore(now)) {
-            throw new ApiException(ErrorType.UNAUTHENTICATED, HttpStatus.UNAUTHORIZED, "Refresh token expired");
-        }
+    audit.user(user.getId().toString(), AuditEvent.USER_TOKEN_ROTATED,
+        null, Map.of("oldTokenId", row.getId().toString(),
+            "newTokenId", newRow.getId().toString()), ip);
+    return issued;
+  }
 
-        User user = row.getUser();
-        IssuedTokens issued = issueTokens(user);
-        RefreshToken newRow = refreshRepo.findByTokenHash(TokenHashes.sha256(issued.refreshToken()))
-                .orElseThrow();
+  @Override
+  @Transactional
+  public void logout(String refreshToken, String ip) {
+    // Always blacklist + try to revoke regardless of DB state, so 204 is idempotent.
+    if (refreshToken != null && !refreshToken.isBlank()) {
+      String hash = TokenHashes.sha256(refreshToken);
+      refreshRepo.findByTokenHash(hash).ifPresent(row -> {
         row.setRevoked(true);
-        row.setRotatedTo(newRow);
-        // The just-rotated token must never be replayed.
-        denylist.blacklistRefreshHash(row.getTokenHash(), remainingLifetime(row.getExpiresAt()));
-
-        audit.user(user.getId().toString(), AuditEvent.USER_TOKEN_ROTATED,
-                null, Map.of("oldTokenId", row.getId().toString(),
-                             "newTokenId", newRow.getId().toString()), ip);
-        return issued;
+        denylist.blacklistRefreshHash(hash, remainingLifetime(row.getExpiresAt()));
+        audit.user(row.getUser().getId().toString(), AuditEvent.USER_LOGOUT,
+            null, Map.of("tokenId", row.getId().toString()), ip);
+      });
     }
-
-    @Override
-    @Transactional
-    public void logout(String refreshToken, String ip) {
-        // Always blacklist + try to revoke regardless of DB state, so 204 is idempotent.
-        if (refreshToken != null && !refreshToken.isBlank()) {
-            String hash = TokenHashes.sha256(refreshToken);
-            refreshRepo.findByTokenHash(hash).ifPresent(row -> {
-                row.setRevoked(true);
-                denylist.blacklistRefreshHash(hash, remainingLifetime(row.getExpiresAt()));
-                audit.user(row.getUser().getId().toString(), AuditEvent.USER_LOGOUT,
-                        null, Map.of("tokenId", row.getId().toString()), ip);
-            });
-        }
-        // If the caller is logging out with a valid access token, kill it now too — don't
-        // wait the full TTL. SecurityContext is populated by the oauth2 resource server
-        // filter; absent if the caller didn't send an Authorization header.
-        Jwt accessJwt = currentAccessJwt();
-        if (accessJwt != null && accessJwt.getId() != null && accessJwt.getExpiresAt() != null) {
-            denylist.blacklistAccessJti(accessJwt.getId(),
-                    Duration.between(Instant.now(), accessJwt.getExpiresAt()));
-        }
+    // If the caller is logging out with a valid access token, kill it now too — don't
+    // wait the full TTL. SecurityContext is populated by the oauth2 resource server
+    // filter; absent if the caller didn't send an Authorization header.
+    Jwt accessJwt = currentAccessJwt();
+    if (accessJwt != null && accessJwt.getId() != null && accessJwt.getExpiresAt() != null) {
+      denylist.blacklistAccessJti(accessJwt.getId(),
+          Duration.between(Instant.now(), accessJwt.getExpiresAt()));
     }
+  }
 
-    private IssuedTokens issueTokens(User user) {
-        String access = jwtService.issueUserAccessToken(user.getId().toString(), user.getRole().name());
-        String refresh = UUID.randomUUID().toString();
+  private IssuedTokens issueTokens(User user) {
+    String access = jwtService.issueUserAccessToken(user.getId().toString(), user.getRole().name());
+    String refresh = UUID.randomUUID().toString();
 
-        RefreshToken row = RefreshToken.builder()
-                .user(user)
-                .tokenHash(TokenHashes.sha256(refresh))
-                .expiresAt(Clocks.nowUtc().plus(jwtConfig.refreshTokenTtl()))
-                .revoked(false)
-                .build();
-        refreshRepo.save(row);
+    RefreshToken row = RefreshToken.builder()
+        .user(user)
+        .tokenHash(TokenHashes.sha256(refresh))
+        .expiresAt(Clocks.nowUtc().plus(jwtConfig.refreshTokenTtl()))
+        .revoked(false)
+        .build();
+    refreshRepo.save(row);
 
-        return new IssuedTokens(access, jwtConfig.accessTokenTtl().getSeconds(),
-                refresh, user.getRole().name());
+    return new IssuedTokens(access, jwtConfig.accessTokenTtl().getSeconds(),
+        refresh, user.getRole().name());
+  }
+
+  private void cascadeRevoke(RefreshToken start) {
+    RefreshToken cursor = start;
+    while (cursor != null) {
+      cursor.setRevoked(true);
+      denylist.blacklistRefreshHash(cursor.getTokenHash(), remainingLifetime(cursor.getExpiresAt()));
+      cursor = cursor.getRotatedTo();
     }
+  }
 
-    private void cascadeRevoke(RefreshToken start) {
-        RefreshToken cursor = start;
-        while (cursor != null) {
-            cursor.setRevoked(true);
-            denylist.blacklistRefreshHash(cursor.getTokenHash(), remainingLifetime(cursor.getExpiresAt()));
-            cursor = cursor.getRotatedTo();
-        }
-    }
+  private static Duration remainingLifetime(OffsetDateTime expiry) {
+    Duration d = Duration.between(Instant.now(), expiry.toInstant());
+    return d.isNegative() ? Duration.ZERO : d;
+  }
 
-    private static Duration remainingLifetime(OffsetDateTime expiry) {
-        Duration d = Duration.between(Instant.now(), expiry.toInstant());
-        return d.isNegative() ? Duration.ZERO : d;
-    }
-
-    private static Jwt currentAccessJwt() {
-        var auth = SecurityContextHolder.getContext().getAuthentication();
-        if (auth instanceof JwtAuthenticationToken t) return t.getToken();
-        return null;
-    }
+  private static Jwt currentAccessJwt() {
+    var auth = SecurityContextHolder.getContext().getAuthentication();
+    if (auth instanceof JwtAuthenticationToken t) return t.getToken();
+    return null;
+  }
 }

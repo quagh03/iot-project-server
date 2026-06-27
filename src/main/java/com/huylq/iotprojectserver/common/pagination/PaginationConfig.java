@@ -8,13 +8,13 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties("iot.pagination")
 public record PaginationConfig(int defaultPageSize, int maxPageSize) {
 
-    public PaginationConfig {
-        if (defaultPageSize <= 0) defaultPageSize = 50;
-        if (maxPageSize <= 0) maxPageSize = 200;
-    }
+  public PaginationConfig {
+    if (defaultPageSize <= 0) defaultPageSize = 50;
+    if (maxPageSize <= 0) maxPageSize = 200;
+  }
 
-    public int clamp(Integer requested) {
-        if (requested == null || requested <= 0) return defaultPageSize;
-        return Math.min(requested, maxPageSize);
-    }
+  public int clamp(Integer requested) {
+    if (requested == null || requested <= 0) return defaultPageSize;
+    return Math.min(requested, maxPageSize);
+  }
 }

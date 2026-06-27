@@ -7,9 +7,9 @@ import java.util.List;
 
 public interface DeviceRepository extends JpaRepository<Device, String>, JpaSpecificationExecutor<Device> {
 
-    List<Device> findByZone(String zone);
+  List<Device> findByZone(String zone);
 
-    List<Device> findByCategory(Device.Category category);
+  List<Device> findByCategory(Device.Category category);
 
-    List<Device> findByParentGateway_DeviceId(String parentGatewayId);
+  List<Device> findByParentGateway_DeviceId(String parentGatewayId);
 }

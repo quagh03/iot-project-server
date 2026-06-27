@@ -13,30 +13,32 @@ package com.huylq.iotprojectserver.audit;
  */
 public enum AuditEvent {
 
-    // ---- security/user -----------------------------------------------------------------
-    USER_LOGIN("user.login"),
-    USER_LOGIN_FAILED("user.login.failed"),
-    USER_LOGOUT("user.logout"),
-    USER_TOKEN_ROTATED("user.token.rotated"),
-    USER_TOKEN_REUSE_DETECTED("user.token.reuse-detected"),
+  // ---- security/user -----------------------------------------------------------------
+  USER_LOGIN("user.login"),
+  USER_LOGIN_FAILED("user.login.failed"),
+  USER_LOGOUT("user.logout"),
+  USER_TOKEN_ROTATED("user.token.rotated"),
+  USER_TOKEN_REUSE_DETECTED("user.token.reuse-detected"),
 
-    USER_CREATE("user.create"),
-    USER_UPDATE("user.update"),
-    USER_DELETE("user.delete"),
-    USER_PASSWORD_RESET("user.password-reset"),
+  USER_CREATE("user.create"),
+  USER_UPDATE("user.update"),
+  USER_DELETE("user.delete"),
+  USER_PASSWORD_RESET("user.password-reset"),
 
-    // ---- system (PartitionManager, retention sweeper, scheduled jobs) ------------------
-    PARTITION_CREATED("partition.created"),
-    PARTITION_DROPPED("partition.dropped");
+  // ---- system (PartitionManager, retention sweeper, scheduled jobs) ------------------
+  PARTITION_CREATED("partition.created"),
+  PARTITION_DROPPED("partition.dropped");
 
-    private final String code;
+  private final String code;
 
-    AuditEvent(String code) {
-        this.code = code;
-    }
+  AuditEvent(String code) {
+    this.code = code;
+  }
 
-    /** Stable string written to {@code audit_logs.event}. */
-    public String code() {
-        return code;
-    }
+  /**
+   * Stable string written to {@code audit_logs.event}.
+   */
+  public String code() {
+    return code;
+  }
 }

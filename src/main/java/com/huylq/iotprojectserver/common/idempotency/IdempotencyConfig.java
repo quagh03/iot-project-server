@@ -8,7 +8,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties("iot.idempotency")
 public record IdempotencyConfig(int ttlHours) {
 
-    public IdempotencyConfig {
-        if (ttlHours <= 0) ttlHours = 24;
-    }
+  public IdempotencyConfig {
+    if (ttlHours <= 0) ttlHours = 24;
+  }
 }

@@ -7,6 +7,8 @@ import java.util.UUID;
 
 public interface RuleRepository extends JpaRepository<Rule, UUID> {
 
-    /** Rules the engine evaluates — enabled only, ordered by priority (highest first). */
-    List<Rule> findByEnabledTrueOrderByPriorityDesc();
+  /**
+   * Rules the engine evaluates — enabled only, ordered by priority (highest first).
+   */
+  List<Rule> findByEnabledTrueOrderByPriorityDesc();
 }
