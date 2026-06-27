@@ -5,6 +5,7 @@ import com.huylq.iotprojectserver.api.dto.auth.DeviceTokenResponse;
 import com.huylq.iotprojectserver.security.device.DeviceTokenService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -21,12 +22,15 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/v1/oauth2/token")
 @RequiredArgsConstructor
+@Slf4j
 public class DeviceTokenController {
 
   private final DeviceTokenService deviceTokenService;
 
   @PostMapping(consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE)
   public ResponseEntity<DeviceTokenResponse> token(@Valid DeviceTokenRequest request) {
+    log.info("POST /oauth2/token grant_type=client_credentials clientId='{}' requestedScopes={}",
+        request.client_id(), request.requestedScopes());
     DeviceTokenService.DeviceTokenResult result =
         deviceTokenService.mint(request.client_id(), request.client_secret(),
             request.requestedScopes());

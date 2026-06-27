@@ -18,6 +18,12 @@ spring:
         jdbc:
           time_zone: UTC
 
+logging:
+  pattern:
+    # %X{correlationId} is bound per-request by CorrelationIdFilter; "system" for
+    # non-request threads (startup, scheduled jobs).
+    level: "%5p [%X{correlationId:-system}]"
+
 management:
   endpoints:
     web:

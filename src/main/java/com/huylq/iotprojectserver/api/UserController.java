@@ -14,6 +14,7 @@ import com.huylq.iotprojectserver.security.user.UserService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -35,6 +36,7 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/v1/users")
 @RequiredArgsConstructor
+@Slf4j
 public class UserController {
 
   private final UserService userService;
@@ -46,6 +48,7 @@ public class UserController {
                                                      @RequestParam(required = false) User.Status status,
                                                      @RequestParam(defaultValue = "0") int offset,
                                                      @RequestParam(required = false) Integer pageSize) {
+    log.debug("GET /users role={} status={} offset={} pageSize={}", role, status, offset, pageSize);
     int limit = pagination.clamp(pageSize);
     List<UserDto> items = userService.list(role, status, offset, limit).stream()
         .map(UserDto::from).toList();
@@ -57,6 +60,7 @@ public class UserController {
   @PreAuthorize("hasRole('ADMIN')")
   public ResponseEntity<UserDto> create(@Valid @RequestBody CreateUserRequest req, @AuthenticationPrincipal Jwt caller,
                                         HttpServletRequest http) {
+    log.info("POST /users username='{}' role={} caller={}", req.username(), req.role(), caller.getSubject());
     User u = userService.create(req.username(), req.password(), req.role(),
         callerRole(caller), caller.getSubject(), AuthController.clientIp(http));
     return ResponseEntity.created(URI.create("/api/v1/users/" + u.getId())).body(UserDto.from(u));
@@ -65,6 +69,7 @@ public class UserController {
   @GetMapping("/{userId}")
   @PreAuthorize("hasRole('ADMIN')")
   public ResponseEntity<UserDto> get(@PathVariable UUID userId) {
+    log.debug("GET /users/{}", userId);
     return ResponseEntity.ok(UserDto.from(userService.get(userId)));
   }
 
@@ -72,6 +77,7 @@ public class UserController {
   @PreAuthorize("hasRole('ADMIN')")
   public ResponseEntity<UserDto> update(@PathVariable UUID userId, @RequestBody UpdateUserRequest req,
                                         @AuthenticationPrincipal Jwt caller, HttpServletRequest http) {
+    log.info("PATCH /users/{} role={} status={} caller={}", userId, req.role(), req.status(), caller.getSubject());
     User u = userService.update(userId, req.role(), req.status(), callerRole(caller),
         caller.getSubject(), AuthController.clientIp(http));
     return ResponseEntity.ok(UserDto.from(u));
@@ -80,6 +86,7 @@ public class UserController {
   @DeleteMapping("/{userId}")
   @PreAuthorize("hasRole('ADMIN')")
   public ResponseEntity<Void> delete(@PathVariable UUID userId, @AuthenticationPrincipal Jwt caller, HttpServletRequest http) {
+    log.info("DELETE /users/{} caller={}", userId, caller.getSubject());
     userService.softDelete(userId, callerRole(caller), caller.getSubject(),
         AuthController.clientIp(http));
     return ResponseEntity.noContent().build();
@@ -90,6 +97,7 @@ public class UserController {
   public ResponseEntity<Void> resetPassword(@PathVariable UUID userId,
                                             @Valid @RequestBody PasswordResetRequest req,
                                             @AuthenticationPrincipal Jwt caller, HttpServletRequest http) {
+    log.info("POST /users/{}/password-reset caller={}", userId, caller.getSubject());
     userService.resetPassword(userId, req.newPassword(), callerRole(caller),
         caller.getSubject(), AuthController.clientIp(http));
     return ResponseEntity.noContent().build();

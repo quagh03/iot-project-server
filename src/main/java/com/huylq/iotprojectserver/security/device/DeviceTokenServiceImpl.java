@@ -6,6 +6,7 @@ import com.huylq.iotprojectserver.common.time.Clocks;
 import com.huylq.iotprojectserver.security.JwtConfig;
 import com.huylq.iotprojectserver.security.JwtService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -16,6 +17,7 @@ import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 class DeviceTokenServiceImpl implements DeviceTokenService {
 
   private final DeviceCredentialRepository credRepo;
@@ -27,10 +29,17 @@ class DeviceTokenServiceImpl implements DeviceTokenService {
   @Override
   @Transactional(readOnly = true)
   public DeviceTokenResult mint(String clientId, String clientSecret, Set<String> requestedScopes) {
+    log.info("Minting device token for clientId='{}' requestedScopes={}", clientId, requestedScopes);
     DeviceCredential cred = credRepo.findByClientId(clientId)
-        .orElseThrow(() -> badClient());
+        .orElseThrow(() -> {
+          log.warn("Device token rejected: unknown clientId='{}'", clientId);
+          return badClient();
+        });
 
-    if (!verifySecret(cred, clientSecret)) throw badClient();
+    if (!verifySecret(cred, clientSecret)) {
+      log.warn("Device token rejected: bad secret for clientId='{}' (deviceId={})", clientId, cred.getDeviceId());
+      throw badClient();
+    }
 
     Set<String> stored = scopeRepo.findByDeviceId(cred.getDeviceId()).stream()
         .map(DeviceScope::getScope)
@@ -41,6 +50,8 @@ class DeviceTokenServiceImpl implements DeviceTokenService {
         : intersection(stored, requestedScopes);
 
     String token = jwtService.issueDeviceToken(cred.getDeviceId(), granted);
+    log.info("Device token issued for deviceId={} clientId='{}' grantedScopes={}",
+        cred.getDeviceId(), clientId, granted);
     return new DeviceTokenResult(token, jwtConfig.deviceTokenTtl().getSeconds(), granted);
   }
 
