@@ -29,6 +29,7 @@ springdoc:
     path: /api/v1/api-docs
   swagger-ui:
     path: /api/v1/swagger-ui.html
+  show-actuator: true
 
 iot:
   rate-limit:
