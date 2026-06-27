@@ -1,5 +1,9 @@
-package com.huylq.iotprojectserver.registry;
+package com.huylq.iotprojectserver.common;
 
+import com.huylq.iotprojectserver.registry.Device;
+import com.huylq.iotprojectserver.registry.DeviceRepository;
+import com.huylq.iotprojectserver.registry.Sensor;
+import com.huylq.iotprojectserver.registry.SensorRepository;
 import com.huylq.iotprojectserver.security.Role;
 
 import com.huylq.iotprojectserver.security.user.User;
@@ -30,21 +34,27 @@ public class LocalDevSeed {
   private final UserRepository userRepo;
   private final PasswordEncoder passwordEncoder;
 
+  private static final String PRESET_PASSWORD = "changeme";
+
+  // Transactional here. All or nothing.
   @Bean
+  @Transactional
   ApplicationRunner seedFixtures() {
+    log.info("Configuring local dev seed");
+    long startMs = System.currentTimeMillis();
     return args -> {
       seedDevices();
-      seedAdmin();
-      seedViewer();
+      seedUsers();
+      log.info("Seeded local dev fixtures in {}ms", System.currentTimeMillis() - startMs);
     };
   }
 
-  @Transactional
   void seedDevices() {
     if (deviceRepo.count() > 0) {
       log.debug("Devices already present — skipping device seed");
       return;
     }
+    long startMs = System.currentTimeMillis();
     log.info("Seeding local dev devices");
 
     Device gateway = deviceRepo.save(Device.builder()
@@ -100,32 +110,36 @@ public class LocalDevSeed {
         .zone("office_1")
         .build());
 
-    log.info("Seeded 4 devices + 2 sensor records in office_1");
+    log.info("Seeded devices in {}ms", System.currentTimeMillis() - startMs);
   }
 
-  @Transactional
-  void seedAdmin() {
-    if (userRepo.existsByUsername("admin")) return;
-    log.info("Seeding bootstrap admin user: admin / changeme");
-    userRepo.save(User.builder()
+  void seedUsers() {
+    if (userRepo.count() > 0) {
+      log.debug("Users already present — skipping user seed");
+      return;
+    }
+
+    long startMs = System.currentTimeMillis();
+
+    log.info("Seeding local dev users");
+
+    User admin = User.builder()
         .username("admin")
-        .passwordHash(passwordEncoder.encode("changeme"))
+        .passwordHash(passwordEncoder.encode(PRESET_PASSWORD))
         .role(Role.SUPER_ADMIN)
         .status(User.Status.ACTIVE)
-        .build());
-  }
+        .build();
+    userRepo.save(admin);
 
-  @Transactional
-  void seedViewer() {
-    if (userRepo.existsByUsername("user")) return;
-    log.info("Seeding bootstrap viewer user: user / changeme");
-    userRepo.save(User.builder()
+    User viewer = User.builder()
         .username("user")
-        .passwordHash(passwordEncoder.encode("changeme"))
+        .passwordHash(passwordEncoder.encode(PRESET_PASSWORD))
         .role(Role.VIEWER)
         .status(User.Status.ACTIVE)
-        .build());
-  }
+        .build();
+    userRepo.save(viewer);
 
+    log.info("Seeded users in {}ms", System.currentTimeMillis() - startMs);
+  }
 
 }
