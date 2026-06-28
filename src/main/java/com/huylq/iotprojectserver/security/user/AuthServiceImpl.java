@@ -22,9 +22,11 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 @RequiredArgsConstructor
@@ -141,8 +143,13 @@ class AuthServiceImpl implements AuthService {
     String access = jwtService.issueUserAccessToken(user.getId().toString(), user.getRole().name());
     String refresh = UUID.randomUUID().toString();
 
-    // Just only allow 1 session login
-    refreshRepo.revokeAllForUser(user.getId());
+    List<RefreshToken> refreshTokens = refreshRepo.findAllActiveByUserId(user.getId());
+    if (!refreshTokens.isEmpty()) {
+      CompletableFuture.runAsync(() -> refreshTokens.forEach(row -> {
+        denylist.blacklistRefreshHash(row.getTokenHash(), remainingLifetime(row.getExpiresAt()));
+      }));
+      refreshRepo.revokeAllForUser(user.getId());
+    }
 
     RefreshToken row = RefreshToken.builder()
         .user(user)
