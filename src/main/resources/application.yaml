@@ -52,6 +52,8 @@ iot:
       access-token-ttl: 1h
       refresh-token-ttl: 30d
       device-token-ttl: 1h
+  device:
+    credential-rotation-grace: 24h   # previous secret stays valid this long after :rotate
   idempotency:
     ttl-hours: 24
   pagination:
