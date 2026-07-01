@@ -41,6 +41,15 @@ class DeviceTokenServiceImpl implements DeviceTokenService {
       throw badClient();
     }
 
+    // Lifecycle gate: only ACTIVE devices may mint tokens. A SUSPENDED device's credential
+    // is disabled (reversible via :activate); DECOMMISSIONED has its credential revoked
+    // outright. Either way, deny without revealing which condition failed (§7 device lifecycle).
+    var status = cred.getDevice().getStatus();
+    if (status != com.huylq.iotprojectserver.registry.Device.Status.ACTIVE) {
+      log.warn("Device token rejected: device '{}' is {} (not ACTIVE)", cred.getDeviceId(), status);
+      throw badClient();
+    }
+
     Set<String> stored = scopeRepo.findByDeviceId(cred.getDeviceId()).stream()
         .map(DeviceScope::getScope)
         .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
