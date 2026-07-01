@@ -22,7 +22,11 @@ iot:
       access-token-ttl: 1m
       refresh-token-ttl: 5m
   mqtt:
-    broker-url: tcp://localhost:1883
-    client-id: iot-server-test
+    # Closed local port so contexts that don't exercise MQTT fail the connect fast
+    # instead of hanging; MQTT-specific tests override this via @DynamicPropertySource
+    # against a Testcontainers broker.
+    broker-url: tcp://127.0.0.1:59999
+    client-id: iot-server-test-${random.uuid}
+    connect-timeout-seconds: 2
   redis:
     enabled: false

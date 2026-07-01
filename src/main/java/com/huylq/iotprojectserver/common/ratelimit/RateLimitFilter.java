@@ -78,9 +78,12 @@ public class RateLimitFilter extends OncePerRequestFilter {
   }
 
   private String keyFor(HttpServletRequest req, Category category) {
-    if (category == Category.AUTH || category == Category.TELEMETRY) {
+    if (category == Category.AUTH) {
       return clientIp(req);
     }
+    // TELEMETRY must key by device identity, not IP (API §1) — it's the control against
+    // sensor flooding/blinding, which needs the limit attributed to the flooding device
+    // rather than a shared/NATed IP.
     Jwt jwt = currentJwt();
     return jwt != null ? jwt.getSubject() : clientIp(req);
   }

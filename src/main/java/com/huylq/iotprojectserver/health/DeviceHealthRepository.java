@@ -13,6 +13,23 @@ public interface DeviceHealthRepository extends JpaRepository<DeviceHealth, Stri
   List<DeviceHealth> findByConnectionStatus(DeviceHealth.ConnectionStatus status);
 
   /**
+   * Zone online/offline roll-up (API §6 connectivity). Driven from {@code Device}, not
+   * {@code DeviceHealth}, with an ad hoc {@code LEFT JOIN} so a device that has never
+   * sent a heartbeat still counts — as offline — rather than being silently excluded.
+   */
+  @Query("""
+      SELECT d.zone AS zone,
+             SUM(CASE WHEN dh.connectionStatus = 'ONLINE' THEN 1L ELSE 0L END) AS online,
+             SUM(CASE WHEN dh.connectionStatus = 'OFFLINE' OR dh IS NULL THEN 1L ELSE 0L END) AS offline,
+             COUNT(d) AS total
+      FROM Device d LEFT JOIN DeviceHealth dh ON dh.deviceId = d.deviceId
+      WHERE (CAST(:zone AS string) IS NULL OR d.zone = :zone)
+      GROUP BY d.zone
+      ORDER BY d.zone
+      """)
+  List<ZoneConnectivityRow> rollUpByZone(@Param("zone") String zone);
+
+  /**
    * Upsert the latest health row for a device on every heartbeat.
    */
   @Modifying

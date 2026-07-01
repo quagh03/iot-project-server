@@ -143,7 +143,7 @@ class AuthServiceImpl implements AuthService {
     String access = jwtService.issueUserAccessToken(user.getId().toString(), user.getRole().name());
     String refresh = UUID.randomUUID().toString();
 
-    List<RefreshToken> refreshTokens = refreshRepo.findAllActiveByUserId(user.getId());
+    List<RefreshToken> refreshTokens = refreshRepo.findAllActiveByUserId(user.getId(), Clocks.nowUtc());
     if (!refreshTokens.isEmpty()) {
       CompletableFuture.runAsync(() -> refreshTokens.forEach(row -> {
         denylist.blacklistRefreshHash(row.getTokenHash(), remainingLifetime(row.getExpiresAt()));

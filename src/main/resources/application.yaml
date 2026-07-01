@@ -65,3 +65,12 @@ iot:
       - audit_logs
     retention-months: 0   # 0 = retention drop disabled (Open Question #1)
     dry-run: true         # log dropped partitions instead of actually dropping
+  mqtt:
+    connect-timeout-seconds: 10
+    keep-alive-interval-seconds: 60
+    automatic-reconnect: true
+    max-reconnect-delay-ms: 30000
+  telemetry:
+    max-clock-skew-future: 5m   # device ts ahead of server time beyond this is flagged as implausible
+    max-clock-skew-past: 1h     # device ts behind server time beyond this is flagged as stale-replay
+    history-max-window: 7d      # GET /v1/telemetry rejects a from/to span wider than this

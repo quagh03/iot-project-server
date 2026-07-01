@@ -1,6 +1,7 @@
 package com.huylq.iotprojectserver.registry;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Device registry & lifecycle (System Design §9 {@code registry} module).
@@ -26,6 +27,13 @@ public interface RegistryService {
                 String callerId, String ip);
 
   List<Sensor> listSensors(String gatewayId);
+
+  /**
+   * Registry-derived lookup for ingest-time validation (e.g. {@code telemetry}'s
+   * sensorType/gateway cross-check) — {@link Optional#empty()} rather than a 404, since
+   * callers outside this module treat "unknown sensor" as their own validation failure.
+   */
+  Optional<Sensor> findSensor(String sensorId);
 
   void activate(String deviceId, String callerId, String ip);
 

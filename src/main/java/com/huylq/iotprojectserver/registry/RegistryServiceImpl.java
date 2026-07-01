@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Service
 @RequiredArgsConstructor
@@ -138,6 +139,12 @@ class RegistryServiceImpl implements RegistryService {
     List<Sensor> sensors = sensorRepo.findByGateway_DeviceId(gatewayId);
     log.debug("Gateway '{}' has {} sensors", gatewayId, sensors.size());
     return sensors;
+  }
+
+  @Override
+  @Transactional(readOnly = true)
+  public Optional<Sensor> findSensor(String sensorId) {
+    return sensorRepo.findById(sensorId);
   }
 
   @Override
