@@ -544,7 +544,8 @@ sequenceDiagram
     participant BE as Backend
 
     Act--xB: connection lost
-    Note over BE: backend may still issue commands;<br/>broker queues QoS-1 for the persistent session
+    Note over BE: backend may still issue commands
+    Note over BE: broker queues QoS-1 for the persistent session
     loop exponential backoff (capped, jittered)
         Act->>B: CONNECT (cleanSession=false, fresh token)
     end
@@ -572,7 +573,8 @@ sequenceDiagram
     Admin->>API: POST /api/v1/devices/{deviceId}/rotate-secret
     API-->>Admin: 200 { clientId, clientSecret, graceExpiresAt }  ← new secret shown ONCE
     Admin->>Dev: provision new client_secret (before grace expires)
-    Note over Dev: keep operating on old token until then;<br/>next re-auth (Flow 2) uses the NEW secret
+    Note over Dev: keep operating on old token until then
+    Note over Dev: next re-auth (Flow 2) uses the NEW secret
     Note over Dev,API: after graceExpiresAt the old secret is rejected
 ```
 
