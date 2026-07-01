@@ -30,7 +30,7 @@ These apply to **every** endpoint so clients write one parser, one paginator, on
 
 ### Auth & authorization
 - `Authorization: Bearer <access_token>` on everything except `POST /v1/auth/login`, `POST /v1/auth/refresh`, and the device token endpoint.
-- **Users:** stateless JWT, 1 h access token; roles `SUPER_ADMIN > ADMIN > OPERATOR > VIEWER` carried in the token and enforced per-endpoint.
+- **Users:** stateless JWT, 1 h access token; roles `SUPER_ADMIN > ADMIN > OPERATOR > TECHNICIAN > VIEWER` carried in the token and enforced per-endpoint. (`TECHNICIAN` is a maintenance/field role between `OPERATOR` and `VIEWER`.)
 - **Devices:** OAuth2 client-credentials token gated by scopes (`telemetry:publish`, `heartbeat:publish`); devices may call **only** the ingest fallback endpoints.
 
 ### Casing, dates, IDs
@@ -126,7 +126,7 @@ The device token endpoint accepts standard OAuth2 form-encoded params and return
 ## 3. Users & RBAC (admin)
 
 ### Consumer & use case
-Admins manage operator accounts and roles. `SUPER_ADMIN` required to grant `ADMIN`/`SUPER_ADMIN`; `ADMIN` may manage `OPERATOR`/`VIEWER`.
+Admins manage operator accounts and roles. `SUPER_ADMIN` required to grant `ADMIN`/`SUPER_ADMIN`; `ADMIN` may manage `OPERATOR`/`TECHNICIAN`/`VIEWER`.
 
 ### Contract
 
@@ -272,6 +272,8 @@ A reading is numeric **or** boolean: exactly one of `valueNum` / `valueBool` is 
 | `GET /v1/sensors/{sensorId}/latest` | Latest reading for one sensor | `VIEWER` | `200` |
 | `GET /v1/devices/{deviceId}/health` | Latest health + connectivity | `VIEWER` | `200` |
 | `GET /v1/connectivity` | Online/offline roll-up across devices (filter `?zone=`) | `VIEWER` | `200` |
+| `GET /v1/actuator-state` | Desired-vs-reported state per actuator (filter `?zone=&drifted=`) | `VIEWER` | `200` |
+| `GET /v1/devices/{deviceId}/actuator-state` | Desired-vs-reported state for one actuator | `VIEWER` | `200` |
 
 **Current-state item**
 ```json
@@ -297,6 +299,24 @@ A reading is numeric **or** boolean: exactly one of `valueNum` / `valueBool` is 
 }
 ```
 
+**Actuator state** — the control-plane mirror of `sensor_latest`, backing the dashboard's toggle grid ("is this light/fan ON *right now*"). It is a **read** for everyone who can see the dashboard (`VIEWER`+); *commanding* an actuator is the separate, more privileged path in §8. The DTO keeps **`desiredState`** (what we last commanded) distinct from **`reportedState`** (what the device last confirmed) — the gap between them is the in-flight / drift signal the UI renders. The boolean `inFlight` (`desiredState ≠ reportedState`) is a server-computed convenience for that render.
+
+```json
+{
+  "deviceId": "act_exhaust_1",
+  "zone": "office_1",
+  "desiredState": "ON",
+  "reportedState": "OFF",
+  "inFlight": true,
+  "attributes": { "level": 3, "mode": "auto" },
+  "lastCommandId": "cmd_7a21",
+  "commandedAt": "2026-06-25T10:30:00Z",
+  "updatedAt": "2026-06-25T10:30:01Z"
+}
+```
+
+`GET /v1/actuator-state?drifted=true` returns only the rows where `desiredState ≠ reportedState` — the operator "needs attention" view, served by the partial drift index, never a scan. `?zone=` filters the grid (resolved by joining `devices`; `zone` is not stored on the mirror itself). A `deviceId` that is not an actuator (or has no state row yet) → `404`.
+
 These reads are **eventually consistent by one sample** (the live view may lag the freshest reading) — acceptable per the consistency targets and documented so clients don't treat it as transactional. Responses are safe to send with a short `Cache-Control: max-age` for polling clients.
 
 ---
@@ -317,10 +337,12 @@ The authenticated device identity must match the body `deviceId` → mismatch is
 
 ---
 
-## 8. Commands
+## 8. Commands & operator device control
 
 ### Consumer & use case
-Operators (and the rule engine, internally) issue actuator commands; the dashboard polls status through the `PENDING → RECEIVED → SUCCESS/FAILED/TIMEOUT` lifecycle. **Acks arrive over MQTT** (`iot/command_ack/{device_id}`), not REST — the REST side only issues and reports.
+Operators issue actuator commands from the dashboard (turn on/off, set parameters) and poll the outcome; the rule engine issues the *same* commands internally. There is **one command pipeline**, not a parallel manual path — a human-issued command is just a `commands` row whose `issuedBy` is a user id. The dashboard polls status through the `PENDING → RECEIVED → SUCCESS/FAILED/TIMEOUT` lifecycle. **Acks arrive over MQTT** (`iot/command_ack/{device_id}`), not REST — the REST side only issues and reports.
+
+**One resource, not a nested one.** Issue stays on the flat `POST /v1/commands` with `targetId` in the body (not `POST /devices/{id}/commands`): the command is a first-class resource with its own lifecycle, list, and status reads, and keeping it flat avoids two URLs for one lifecycle. This is the synchronous-request / asynchronous-outcome model of system design §5.8 — the endpoint *issues* a command (returns `202` immediately), it does not *complete* one.
 
 ### Contract
 
@@ -355,7 +377,37 @@ Issue returns **`202`**, not `201`: the resource (the command record) exists, bu
 }
 ```
 
-Because MQTT QoS 1 is at-least-once, **commands are idempotent state-sets** (`SET status=ON`, not `TOGGLE`) and devices dedupe on `commandId` — so a redelivery is harmless. There is deliberately **no cancel/delete** endpoint: a command in flight cannot be recalled; issue the inverse state-set instead. Commands with no ack within the window are swept to `TIMEOUT` server-side; clients observe this purely through `status` (the timeout sweeper doubles as *command-suppression detection* — an attacker dropping MQTT can't silently suppress `exhaust ON`). `action` and `parameters` are **whitelisted** against the actuator's contract — no free-form passthrough to the device — so injection through command params is rejected at the edge. Targeting a non-actuator or a `DECOMMISSIONED` device, or an unknown action/param → `422`.
+Because MQTT QoS 1 is at-least-once, **commands are idempotent state-sets** (`SET status=ON`, not `TOGGLE`) and devices dedupe on `commandId` — so a redelivery is harmless. There is deliberately **no cancel/delete** endpoint: a command in flight cannot be recalled; issue the inverse state-set instead. Commands with no ack within the window are swept to `TIMEOUT` server-side; clients observe this purely through `status` (the timeout sweeper doubles as *command-suppression detection* — an attacker dropping MQTT can't silently suppress `exhaust ON`). Issuing a command also upserts `actuator_state.desired_state` so the toggle grid reflects the in-flight intent immediately (§6); the device's ack later sets `reported_state`.
+
+### Validation on issue (`422`)
+The target must be an **`ACTIVE` actuator**. The endpoint rejects, with `422`:
+- a `targetId` that is a sensor or gateway (not `category = actuator`);
+- an actuator that is `INACTIVE`, `SUSPENDED`, or `DECOMMISSIONED`;
+- an `action` / `parameters` pair not on the **per-`deviceType` whitelist** (`SET status=ON|OFF` for a light, `OPEN|CLOSED` for a curtain, a bounded setpoint for an AC, …) — no free-form passthrough to the device, so injection through command params is rejected at the edge.
+
+### Authorization — who may command what
+Control is a physical action, so *who* may issue *what* is enforced with `@PreAuthorize` **at the endpoint, never in the UI**. Roles split actuators into **routine** (light, AC, curtain) and **safety** (exhaust fan, smoke-linked):
+
+| Role | Read state | Routine actuators | Safety actuators | Override an active safety rule |
+|------|:--:|:--:|:--:|:--:|
+| `VIEWER` | ✅ | ✗ | ✗ | ✗ |
+| `TECHNICIAN` | ✅ | ✅ (permitted zones — diagnostics/testing) | ✗ | ✗ |
+| `OPERATOR` | ✅ | ✅ (permitted zones) | ✅ (turn **ON** / escalate only) | ✗ |
+| `ADMIN` | ✅ | ✅ | ✅ | ✗ |
+| `SUPER_ADMIN` | ✅ | ✅ | ✅ | ✅ (explicit + confirmed + audited) |
+
+A role-denied command → `403`. `OPERATOR`/`TECHNICIAN` authority over routine actuators is **zone-scoped**: if zone grants are adopted (system/DB design open question), the endpoint additionally checks a `user_zone_grants` lookup and returns `403` for a zone the user does not hold. `TECHNICIAN` may drive only **routine** actuators (maintenance/testing) — never safety actuators. `ADMIN`/`SUPER_ADMIN` bypass the zone filter.
+
+### Safety interlock (`409`)
+The **rule engine outranks manual control** — this is a safety system, and degradation is always fail-safe. A manual command that *contradicts* an active safety action (e.g. `exhaust OFF` while a smoke rule holds it `ON`, or any command countering an `OPEN` smoke alert for that zone) is rejected with **`409`**, type `.../errors/safety-interlock`, for everyone below `SUPER_ADMIN`. Manual control may always move an actuator *toward* the safe state, never silently away from one the system is enforcing.
+
+`SUPER_ADMIN` may override, but only **explicitly**: the issue body must carry `override: true` and a non-empty `overrideReason`. An override is logged as a distinct `SAFETY_OVERRIDE` audit event (actor, target, reason, `commandId`) in addition to the normal command audit. An `override` flag sent by any role below `SUPER_ADMIN`, or without a `reason`, is itself rejected (`403` / `422` respectively).
+
+### Audit & rate limit
+Every manual command writes a `MANUAL_COMMAND` audit entry — actor, actor-type `USER`, source IP, target, action, `commandId` — because manual control is exactly the kind of control-relevant event that must be non-repudiable. Manual commands count against the per-user rate limit (§1), which doubles as abuse detection on the control path.
+
+### Bulk / zone control (deliberately optional)
+"Turn off all lights in `office_1`" is **sugar that fans out into N individual per-device commands** server-side — each keeps its own `commandId`, ack, audit entry, and interlock check. The unit of truth stays the single-device command; there is no second lifecycle for batches. Not in `v1` unless the UX needs it — see §12.
 
 ---
 
@@ -505,10 +557,11 @@ Drawn so the next likely change is additive, not breaking — tracking the syste
 - **Dashboard liveness (assumption #4).** Today's contract is poll-based on `/current-state`, `/connectivity`, and `GET /commands/{id}`. If sub-second push becomes a requirement, add a **WebSocket/SSE stream** (e.g. `GET /v1/stream/state`) alongside — purely additive, the polling endpoints remain.
 - **History aggregation (assumption #3 / TimescaleDB path).** When charts dominate, add `GET /v1/telemetry/aggregates?metric=temp&zone=office_1&interval=1h&from=&to=` backed by continuous aggregates — a new endpoint, not a change to `GET /v1/telemetry`.
 - **Bulk admin ops.** If operators need batch device actions, add `POST /v1/devices:batch-suspend` rather than overloading the single-resource transitions.
+- **Bulk / zone control (operator control plane).** If the UX needs "turn off all lights in `office_1`", add `POST /v1/commands:batch` (or a zone-scoped variant) that **fans out into N individual commands** server-side — each keeping its own `commandId`, ack, audit, and safety-interlock check. Additive; the single-device `POST /v1/commands` lifecycle stays the unit of truth (§8).
 - **Notifications.** Alert notification hooks (email/webhook) become `POST /v1/notification-channels` + a rule action — additive to §9/§10.
 - **Service extraction.** Because every controller already delegates through a module service interface, peeling `telemetry`+`rules` into their own service later changes the wiring behind these paths, not the paths themselves — the REST contract is stable across that refactor.
 
 ---
 
 ### Verdict
-✅ **A REST edge that matches the architecture's grain.** It honours the system design's load-bearing decisions — the current-state/history split (§6 vs §5), command idempotency and the async ack lifecycle (`202` + polling, no cancel), the one-ingestion-funnel fallback (`POST /telemetry` → same service), write-once device secrets, safe-evaluator rule validation on write, and append-only audit. The conventions (one error shape, bounded pagination, URI versioning, idempotency keys, scope/role gates) are uniform so clients integrate once. The deliberate constraints worth noting to consumers are **mandatory time-window scoping on the partitioned reads** (telemetry, audit), the **one-sample eventual consistency** of the live state path, and the **device-plane integrity checks** on ingest (payload identity must match the token → `403`; implausible-skew readings rejected as stale-replay → `422`) that follow from treating this as a safety system, not just a data system.
+✅ **A REST edge that matches the architecture's grain.** It honours the system design's load-bearing decisions — the current-state/history split (§6 vs §5), command idempotency and the async ack lifecycle (`202` + polling, no cancel), the **operator control plane** layered onto the *one* command pipeline (synchronous request / asynchronous outcome, `actuator_state` desired-vs-reported reads, role + zone authorization, `409` safety interlock with audited `SUPER_ADMIN` override — §6/§8), the one-ingestion-funnel fallback (`POST /telemetry` → same service), write-once device secrets, safe-evaluator rule validation on write, and append-only audit. The conventions (one error shape, bounded pagination, URI versioning, idempotency keys, scope/role gates) are uniform so clients integrate once. The deliberate constraints worth noting to consumers are **mandatory time-window scoping on the partitioned reads** (telemetry, audit), the **one-sample eventual consistency** of the live state path, and the **device-plane integrity checks** on ingest (payload identity must match the token → `403`; implausible-skew readings rejected as stale-replay → `422`) that follow from treating this as a safety system, not just a data system.

@@ -11,7 +11,7 @@
 - Phases are ordered by dependency. **Do not start a phase until the previous one meets its Definition of Done (DoD).** Each phase leaves the system compiling, migrating, and passing its tests.
 - Every phase lists: **Goal · Deliverables (what is achieved) · Endpoints/Topics · Modules · Data · Load-bearing decisions to honor · DoD · Tests.**
 - The two design documents remain authoritative: the **Data Spec** wins for wire formats; the **System Design** wins for structure/decisions; the **API Design / OpenAPI** wins for REST contracts.
-- The **Coverage Matrix** at the end maps every one of the 44 REST operations and every load-bearing decision to a phase — use it to confirm nothing is dropped.
+- The **Coverage Matrix** at the end maps every one of the 46 REST operations and every load-bearing decision to a phase — use it to confirm nothing is dropped.
 
 ---
 
@@ -22,13 +22,13 @@ A code-vs-design (§7) audit produced this phase-completion snapshot. Each phase
 | Phase | Status | Headline |
 |---|---|---|
 | **0** Foundation & Scaffolding | ✅ **DONE** | Modular monolith skeleton, RFC 9457 errors, Flyway, OpenAPI, pagination + idempotency infra, common enums all in place. |
-| **1** Persistence & Data Model | ✅ **DONE** | All 13 tables migrated (V1) + V2 added `TECHNICIAN` to the role ladder. Monthly partitioning automated via `PartitionManager`; audit writer (`AuditService.append`) wired and running in `REQUIRES_NEW`. |
+| **1** Persistence & Data Model | ✅ **DONE** (core) | All 13 core tables migrated (V1) + V2 added `TECHNICIAN` to the role ladder. Monthly partitioning automated via `PartitionManager`; audit writer (`AuditService.append`) wired and running in `REQUIRES_NEW`. **Design-update delta:** the operator control plane adds a 14th table — `actuator_state` (**V3**, file already in repo) — and an optional `user_zone_grants` (**V4**); both are pure additive `CREATE TABLE`s applied with Phase 6 (§ Phase 6). |
 | **2** Security & Identity | ✅ **DONE** | OAuth2 resource server, Argon2id, `@PreAuthorize` + 5-level role hierarchy (SUPER_ADMIN > ADMIN > OPERATOR > TECHNICIAN > VIEWER), refresh-token rotation, device client-credentials with scope intersection, rate-limit filter, security headers. |
 | **2.5** Token Revocation & Denylist | ✅ **DONE** | `DenylistJwtValidator` chained for user *and* device tokens; access-`jti` + refresh-hash denylist with TTL = remaining lifetime; refresh-reuse cascade walks `rotated_to`; in-memory ↔ Redis backend flipped by `iot.redis.enabled`. |
-| **3** Device Registry & Lifecycle | ⛔ **NOT STARTED** | No registry CRUD, no lifecycle actions, no credential issue/rotate, no scope replace endpoint. |
+| **3** Device Registry & Lifecycle | ✅ **DONE** | Registry CRUD + filters, named lifecycle actions (activate/suspend/decommission) with side effects, write-once credential issue/rotate with grace window, scope replace. Token minting gated on device status (suspend disables / decommission revokes). 8 device `AuditEvent` codes added. |
 | **4** MQTT + Telemetry + Current State | ⛔ **NOT STARTED** | No MQTT adapter, no ingest funnel (HTTP or MQTT), no `sensor_latest` upserts in the live path, no history/current-state APIs. |
 | **5** Heartbeat / Health / Connectivity | ⛔ **NOT STARTED** | No heartbeat ingest, no LWT consumption, no `device_health` upsert path, no health/connectivity APIs. |
-| **6** Commands + Ack + Timeout Sweeper | ⛔ **NOT STARTED** | No command issue/ack lifecycle, no MQTT publisher, no timeout sweeper, no `CommandService` interface. |
+| **6** Commands + Operator Control Plane | ⛔ **NOT STARTED** | No command issue/ack lifecycle, no MQTT publisher, no timeout sweeper, no `CommandService` interface. **Also unbuilt:** the operator control plane added in the design update — `actuator_state` mirror (V3), role+zone authorization, `409` safety interlock + audited `SUPER_ADMIN` override, `actuator-state` reads. |
 | **7** Rule Engine | ⛔ **NOT STARTED** | Schema exists; **no safe evaluator** — the highest-risk security gap (T8 RCE) until a locked-down SpEL/DSL lands with write-time validation. |
 | **8** Alerts | ⛔ **NOT STARTED** | No alert raise / acknowledge / resolve path. |
 | **9** Audit Query API | ⛔ **NOT STARTED** | Write side complete since Phase 1; no `GET /audit-logs` endpoint yet. |
@@ -51,10 +51,11 @@ Ordered by safety-blast-radius (worst first); each maps to its phase below.
 
 1. **No telemetry ingest integrity (T1 spoofing).** No payload-identity re-validation, no server-side received-timestamp / stale-replay detection, no per-device ingest rate limit. → **Phase 4**.
 2. **No command safety loop (T2 tamper / T3 suppression).** No ack correlation, no timeout sweeper, no command-suppression detection signal, no documented fail-safe actuator default. → **Phase 6** + **Phase 10**.
+   2b. **No operator-control authorization or safety interlock (T4 EoP / safety).** The operator control plane (design update — system design §5.8/§7, API §6/§8) is unbuilt: no role+zone command authorization matrix, no `409` `safety-interlock` rejecting a manual command that contradicts an active safety rule, no audited `SUPER_ADMIN` `override`, no `MANUAL_COMMAND`/`SAFETY_OVERRIDE` audit events, no `actuator_state` desired-vs-reported mirror. → **Phase 6** (interlock needs the rule/alert state from **Phase 7/8** to be fully enforceable — see Phase 6 note).
 3. **No safe rule evaluator (T8 RCE).** `rules.condition` / `rules.action` are TEXT with nothing reading them — but the moment Phase 7 wires evaluation, it **must** use locked-down SpEL or a custom DSL with write-time validation. **Never `eval`.** → **Phase 7**.
 4. **No broker authorization.** Per-`device_id` topic ACL enforcement is a broker-side config that depends on Phase 4 topic shape and Phase 10 broker setup. Until then, device identity on the broker is unverified. → **Phase 4** (topics) + **Phase 10** (ACLs).
 5. **No detection / incident response.** Audit records exist but no alerting on auth-failure bursts, refresh-reuse cascade triggers, broker ACL denials, command anomalies, telemetry gaps, or `403`/`429` spikes. → **Phase 10**.
-6. **`AuditEvent` catalog is incomplete.** Today it covers user/auth/partition only. Add device-register/-delete, credential-rotate, command-issue/-execute, rule-change, alert-acknowledge/-resolve, role-grant codes as each phase lands them. → **Phase 3 → 8**.
+6. **`AuditEvent` catalog is incomplete.** Today it covers user/auth/partition only. Add device-register/-delete, credential-rotate, command-issue/-execute, **`MANUAL_COMMAND` / `SAFETY_OVERRIDE`** (operator control), rule-change, alert-acknowledge/-resolve, role-grant (and `ZONE_GRANT`/`ZONE_REVOKE` if zone grants are adopted) codes as each phase lands them. `audit_logs.event` is free-form `VARCHAR(64)`, so these need no migration. → **Phase 3 → 8**.
 7. **Rate-limit counters still in-memory.** Fine for single-instance; **swap to Redis-backed before any horizontal scale-out** so limits are global, not per-instance. → **Phase 10**.
 8. **JWT signing key is a single shared HMAC in `JWT_SECRET` env var.** §7 secrets table mandates KMS-managed signing key, **scheduled rotation**, and **key-rollover with a `kid` claim** so an emit/verify mix during rollover stays valid. Today there is no `kid`, no JWKSet, no rotation procedure. → **Phase 10** (with Phase 2 carry-over flag).
 9. **No DB encryption at rest, no encrypted-and-restore-tested backups.** §7 checklist line 9; nothing in `application-prod.yaml` or Compose configures this. → **Phase 10**.
@@ -75,7 +76,7 @@ Ordered by safety-blast-radius (worst first); each maps to its phase below.
 4. **Module boundaries are real** — modules talk through service interfaces, never each other's repositories. Only `telemetry`, `command`, `audit`, `health` own write access to their own tables. The `rules → command/alert` hop goes through a published interface.
 5. **RBAC + scopes enforced at the edge** — `@PreAuthorize` on every endpoint per the contract; device endpoints gated by scope.
 6. **Reads of partitioned tables (`telemetry`, `audit_logs`) require a bounded time window** — reject unbounded/oversized queries with `422`.
-7. **Security-relevant actions are audited** — login, device register/delete, credential rotation, rule change, command execution, role change.
+7. **Security-relevant actions are audited** — login, device register/delete, credential rotation, rule change, command execution, **manual operator command (`MANUAL_COMMAND`) and safety override (`SAFETY_OVERRIDE`)**, role change.
 
 ### Definition-of-Done template (every phase)
 - Code compiles; app boots on the `local` profile against Docker Compose.
@@ -98,7 +99,7 @@ flowchart TB
     P25 --> P4["Phase 4\nMQTT Adapter + Telemetry + Current State"]
     P3 --> P4
     P4 --> P5["Phase 5\nHeartbeat / Health / Connectivity"]
-    P4 --> P6["Phase 6\nCommands + Ack + Timeout Sweeper"]
+    P4 --> P6["Phase 6\nCommands + Operator Control Plane"]
     P3 --> P6
     P4 --> P7["Phase 7\nRule Engine"]
     P6 --> P7
@@ -163,10 +164,10 @@ flowchart TB
 
 **Goal:** Working authentication, RBAC, device tokens, rate limiting, and the user-admin CRUD surface. After this, every later endpoint can be gated correctly.
 
-> **Status note:** Login / refresh (with rotation) / logout, `/oauth2/token` client-credentials with scope intersection, user CRUD with authority ceiling, rate-limit filter, security headers, and Argon2id are all in place. **Deviation from design:** `V2__add_technician_role.sql` introduced a fifth role `TECHNICIAN`, slotted between `OPERATOR` and `VIEWER` on the privilege ladder — the design doc §7 still lists only 4 roles (`SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`); reconcile by updating either the doc or removing the role. The ladder is the single source of truth in `Role.java`. **Carry-overs to Phase 10:** (a) rate-limit counters are in-memory (`InMemoryRateLimiter`); flipping to Redis. (b) JWT signing key is a single shared HMAC sourced from the `JWT_SECRET` env var — §7 mandates KMS-managed signing key with **scheduled rotation and a `kid` claim for key-rollover**; this entails moving to asymmetric keys (e.g. RSA/ECDSA), publishing a JWKSet, and adding `kid` to every issued token + the validator chain. (c) Every endpoint added in Phases 3 → 8 must enforce **devices-ingest-only** (T4) — operator/admin endpoints must reject device JWTs, not just under-privileged users.
+> **Status note:** Login / refresh (with rotation) / logout, `/oauth2/token` client-credentials with scope intersection, user CRUD with authority ceiling, rate-limit filter, security headers, and Argon2id are all in place. **Resolved (2026-06-30):** `V2__add_technician_role.sql` introduced a fifth role `TECHNICIAN`, slotted between `OPERATOR` and `VIEWER`. The design docs (system design §0/§7, API design §0/§3/§8, OpenAPI `Role` enum + ladder prose, DB design `users.role` CHECK) have been reconciled to the 5-role ladder `SUPER_ADMIN > ADMIN > OPERATOR > TECHNICIAN > VIEWER`. `TECHNICIAN` = read all state + command **routine** actuators in permitted zones (diagnostics/testing); **no** safety actuators, **no** override; still subject to the safety interlock. `Role.java` remains the single source of truth. **Carry-overs to Phase 10:** (a) rate-limit counters are in-memory (`InMemoryRateLimiter`); flipping to Redis. (b) JWT signing key is a single shared HMAC sourced from the `JWT_SECRET` env var — §7 mandates KMS-managed signing key with **scheduled rotation and a `kid` claim for key-rollover**; this entails moving to asymmetric keys (e.g. RSA/ECDSA), publishing a JWKSet, and adding `kid` to every issued token + the validator chain. (c) Every endpoint added in Phases 3 → 8 must enforce **devices-ingest-only** (T4) — operator/admin endpoints must reject device JWTs, not just under-privileged users.
 
 **Deliverables (what is achieved)**
-- **Spring Security + OAuth2 Resource Server** validating JWTs; method-level `@PreAuthorize` with role hierarchy `SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`.
+- **Spring Security + OAuth2 Resource Server** validating JWTs; method-level `@PreAuthorize` with role hierarchy `SUPER_ADMIN > ADMIN > OPERATOR > TECHNICIAN > VIEWER` (5-level; `TECHNICIAN` added in `V2`).
 - **User auth flow:**
   - `POST /v1/auth/login` → access (1 h) + refresh (30 d) tokens, `role` in response.
   - `POST /v1/auth/refresh` → **rotate** refresh token (revoke old, issue new), mint access; reuse of revoked token → `401` `errors/token-revoked`.
@@ -177,7 +178,7 @@ flowchart TB
 - **Rate limiting filter:** User 100/min, Device 300/min, Auth 20/min, telemetry configurable; `429` + `Retry-After` + `RateLimit-*` headers. Counters in-memory now, **Redis-backed switch** ready (profile-gated) for multi-instance.
 - **Security headers** on all responses: HSTS, `X-Content-Type-Options`, `X-Frame-Options`, CSP. TLS/HTTPS enforced in `prod` config (plain HTTP disabled).
 - **Users & RBAC admin (API §3):** `GET/POST /v1/users`, `GET/PATCH/DELETE /v1/users/{id}`, `POST /v1/users/{id}/password-reset`.
-  - `SUPER_ADMIN` required to grant `ADMIN`/`SUPER_ADMIN`; `ADMIN` manages `OPERATOR`/`VIEWER`; over-authority grant → `403`.
+  - `SUPER_ADMIN` required to grant `ADMIN`/`SUPER_ADMIN`; `ADMIN` manages `OPERATOR`/`TECHNICIAN`/`VIEWER`; over-authority grant → `403`.
   - Duplicate username → `409`; soft-delete sets `DISABLED` + revokes refresh tokens; **no `passwordHash` in DTO**.
 - Audit entries for login, role/status change, password reset, user delete.
 
@@ -296,28 +297,40 @@ flowchart TB
 
 ---
 
-## Phase 6 — Commands: Dispatch, Ack & Timeout Sweeper · ⛔ NOT STARTED
+## Phase 6 — Commands + Operator Control Plane: Dispatch, Ack, Timeout Sweeper · ⛔ NOT STARTED
 
-**Goal:** The command path with full tracked lifecycle and at-least-once safety.
+**Goal:** The command path with full tracked lifecycle and at-least-once safety — and, layered onto that *one* pipeline, the **operator control plane** (design update — system design §5.8/§7, API §6/§8, DB §5.11/§5.12): authorized dashboard users drive actuators directly, see desired-vs-reported state, and track each outcome. There is no parallel manual path — an operator command is just a `commands` row whose `issuedBy` is a user id.
 
-> **Status note (2026-06-26):** `commands` table and entity exist; the issue / publish / ack / sweeper loop does not. **Security-critical:** the timeout sweeper is the **command-suppression detection signal** (T3) — an attacker dropping MQTT messages must surface as a `TIMEOUT`, not silence; emit an audit event that Phase 10 can subscribe to for alerting. `IdempotencyService` already exists — wire it on `POST /commands` per the spec.
+> **Status note (2026-06-26):** `commands` table and entity exist; the issue / publish / ack / sweeper loop does not. The operator control plane (actuator_state mirror, role+zone authorization, safety interlock, override, manual-command audit, actuator-state reads) is entirely unbuilt. **Migration:** `V3__add_actuator_state.sql` is already in the repo (`src/main/resources/db/migration`) — apply it here; it is additive (no backfill, no lock on hot tables) and is ordered after `commands` because `actuator_state.last_command_id` references it. **Security-critical:** (a) the timeout sweeper is the **command-suppression detection signal** (T3) — a dropped MQTT message must surface as a `TIMEOUT`, not silence; emit an audit event Phase 10 can alert on. (b) The **safety interlock** is the headline new control — a manual command contradicting an active safety action must be refused `409`. (c) `IdempotencyService` already exists — wire it on `POST /commands`.
 
 **Deliverables (what is achieved)**
-- **Issue:** `POST /v1/commands` (`OPERATOR`, **`Idempotency-Key` required**) → persist `command` as `PENDING`, publish to `iot/command/{device_id}` (QoS 1), return **`202`** + `Location`. Targeting a non-actuator or `DECOMMISSIONED` device → `422`. **Command-parameter whitelist (§7 input-validation table):** the `action` and `parameters` are validated against an allow-listed catalog per `device_type` (e.g. `exhst_fan` accepts `SET status ∈ {ON,OFF}` only) — anything outside the whitelist → `422` with the offending token. No free-form parameter pass-through to the device.
-- **Ack correlation:** subscribe `iot/command_ack/{device_id}`; correlate by `commandId`; advance `PENDING → RECEIVED → SUCCESS/FAILED`, stamping `received_at`/`executed_at`.
-- **Idempotent state-sets:** actions are `SET status=ON` style (not `TOGGLE`); document the device-side dedupe-on-`commandId` contract so QoS-1 redelivery is harmless (§5.5).
-- **Timeout sweeper:** scheduled job marks `PENDING/RECEIVED` commands `TIMEOUT` after N seconds without ack (config-driven).
-- **Command-suppression & fail-safe (§7 "Availability as a security property"):** a `TIMEOUT` is emitted as a **detection signal** (consumed in Phase 10) so an attacker dropping MQTT messages can't silently suppress `exhaust ON`; document the **fail-safe actuator default** contract — devices adopt a known safe state on comms loss rather than dropping a safety action.
-- **Status reads:** `GET /v1/commands` (cursor paged; filters `targetId`, `status`, `from`, `to`), `GET /v1/commands/{commandId}`. **No cancel/delete** endpoint — issue the inverse state-set instead.
-- **Internal issue interface:** a published `CommandService` interface so the rule engine (Phase 7) can issue commands without touching the controller or repository.
-- Audit on command issue + execution.
 
-**Endpoints:** `POST /v1/commands`, `GET /v1/commands`, `GET /v1/commands/{commandId}`.
+*Command pipeline (core):*
+- **Issue:** `POST /v1/commands` (`OPERATOR`, **`Idempotency-Key` required**) → validate → persist `command` as `PENDING` → **upsert `actuator_state.desired_state` + `last_command_id` + `commanded_at`** (so the toggle grid reflects intent immediately) → publish to `iot/command/{device_id}` (QoS 1) → return **`202`** + `Location` `{commandId, status: PENDING}`.
+- **Command-parameter whitelist (§7 / API §8 validation `422`):** target must be an **`ACTIVE` actuator** — reject a sensor/gateway, or an `INACTIVE`/`SUSPENDED`/`DECOMMISSIONED` device; `action` + `parameters` validated against an allow-listed catalog per `device_type` (e.g. `exhst_fan` accepts `SET status ∈ {ON,OFF}`; curtain `OPEN|CLOSED`; AC bounded setpoint) — anything outside → `422` with the offending token. No free-form passthrough to the device.
+- **Ack correlation:** subscribe `iot/command_ack/{device_id}`; correlate by `commandId`; advance `PENDING → RECEIVED → SUCCESS/FAILED`, stamping `received_at`/`executed_at`, and **upsert `actuator_state.reported_state`** on ack.
+- **Idempotent state-sets:** actions are `SET status=ON` style (not `TOGGLE`); document the device-side dedupe-on-`commandId` contract so QoS-1 redelivery is harmless (§5.5).
+- **Timeout sweeper:** scheduled job marks `PENDING/RECEIVED` commands `TIMEOUT` after N seconds without ack (config-driven), via a status-guarded `UPDATE … WHERE status IN ('PENDING','RECEIVED')` (DB §5.8) so it can't race the ack handler.
+- **Command-suppression & fail-safe (§7 "Availability as a security property"):** a `TIMEOUT` is emitted as a **detection signal** (consumed in Phase 10) so a dropped MQTT message can't silently suppress `exhaust ON`; document the **fail-safe actuator default** contract — devices adopt a known safe state on comms loss.
+- **Status reads:** `GET /v1/commands` (cursor paged; filters `targetId`, `status`, `from`, `to`), `GET /v1/commands/{commandId}`. **No cancel/delete** endpoint — issue the inverse state-set instead.
+- **Internal issue interface:** a published `CommandService` interface so the rule engine (Phase 7) can issue commands without touching the controller or repository — the rule engine and operators share this one entry point.
+
+*Operator control plane (design update):*
+- **`actuator_state` mirror (V3):** apply `V3__add_actuator_state.sql` (one row per actuator: `desired_state` vs `reported_state`, `attributes` jsonb, `last_command_id` FK `ON DELETE SET NULL`, partial drift index `WHERE desired_state IS DISTINCT FROM reported_state`). Upsert `desired_state` on issue, `reported_state` on ack — kept off the `commands` history table (DB §5.11). "Actuator-only" is enforced at the app layer (`422`), not a cross-table CHECK.
+- **Actuator-state reads (API §6, `VIEWER`+):** `GET /v1/actuator-state` (filters `?zone=` — resolved by joining `devices`, not stored on the mirror; `?drifted=true` → only rows where `desiredState ≠ reportedState`, served by the partial index, never a scan) and `GET /v1/devices/{deviceId}/actuator-state` (single actuator; non-actuator or no-row-yet → `404`). DTO carries server-computed `inFlight` (`desiredState ≠ reportedState`); eventually consistent by one sample; short `Cache-Control`. *(These are listed under API §6 current-state but land here because the data lifecycle is the command path.)*
+- **Command authorization — role + zone (`@PreAuthorize`, server-side, never the UI):** roles split actuators into **routine** (light/AC/curtain) and **safety** (exhaust/smoke-linked). `VIEWER` cannot command; `OPERATOR` drives routine actuators **in permitted zones** and may turn safety actuators **ON/escalate only**; `ADMIN` any actuator; `SUPER_ADMIN` additionally may override safety rules. Role-denied → `403`. `OPERATOR` zone scope checks `user_zone_grants` **if adopted** (see optional V4 below); `ADMIN`/`SUPER_ADMIN` bypass the zone filter. **Devices-ingest-only (T4):** device JWTs are rejected on this endpoint.
+- **Safety interlock (`409` `errors/safety-interlock`):** the rule engine outranks manual control. A manual command that *contradicts* an active safety action (e.g. `exhaust OFF` while a smoke rule holds it `ON`, or any command countering an `OPEN` smoke alert in that zone) is rejected for everyone below `SUPER_ADMIN`. Manual control may always move an actuator *toward* the safe state. **Dependency:** full enforcement needs the active-safety-state signal from the rule engine (Phase 7) and open alerts (Phase 8); implement the interlock check + `409` contract here against the `AlertService`/rule-state interface, and complete the wiring as Phase 7/8 land (the published-interface boundary, §9, makes this a wiring step, not a refactor).
+- **`SUPER_ADMIN` override:** the issue body may carry `override: true` + a non-empty `overrideReason`; an `override` from a lower role → `403`, `override` without a reason → `422`. A successful override writes a distinct **`SAFETY_OVERRIDE`** audit event (actor, target, reason, `commandId`) in addition to the normal command audit.
+- **Audit & rate limit:** every manual command writes a **`MANUAL_COMMAND`** entry (actor, actor-type `USER`, source IP, target, action, `commandId`); manual commands count against the per-user rate limit (abuse signal). Extend the `AuditEvent` catalog with `COMMAND_ISSUE`, `COMMAND_EXECUTE`, `MANUAL_COMMAND`, `SAFETY_OVERRIDE`.
+- **Optional — zone-scoped operator authority (DB §9 / open question §11.7):** if adopted, apply `V4__add_user_zone_grants.sql` (`user_zone_grants(user_id, zone)` + zone index), consult it for `OPERATOR` command authorization, and audit `ZONE_GRANT`/`ZONE_REVOKE`. **Decide before building the authorization check** — cheap now, awkward to retrofit. If authority stays global-per-role, skip V4 and the lookup.
+
+**Endpoints:** `POST /v1/commands`, `GET /v1/commands`, `GET /v1/commands/{commandId}`, `GET /v1/actuator-state`, `GET /v1/devices/{deviceId}/actuator-state`.
 **Topics:** `iot/command/{device_id}` (publish), `iot/command_ack/{device_id}` (subscribe).
-**Modules:** `command`, `mqtt`, `api`, `audit`.
-**Load-bearing decisions to honor:** QoS-1 + idempotent state-sets + dedupe-on-commandId (§5.5); timeout sweeper (§8); `202` + polling, **no cancel** (API §8); idempotency key required.
-**DoD:** issuing a command persists `PENDING`, publishes over MQTT, and returns `202`; acks drive the lifecycle to `SUCCESS/FAILED`; missing ack lands on `TIMEOUT`; re-issuing with the same `Idempotency-Key` returns the original record; invalid target → `422`.
-**Tests:** issue→publish→ack lifecycle; timeout sweep; idempotency replay; duplicate-delivery harmlessness; invalid-target `422`; cursor pagination + filters.
+**Data:** `actuator_state` (V3); optional `user_zone_grants` (V4). `commands` and `idempotency_keys` reused unchanged (DB §5.12).
+**Modules:** `command`, `mqtt`, `api`, `audit`; reads `registry` (target validation, zone join), `alert`/`rules` (interlock state via published interface), `security/user` (zone grants).
+**Load-bearing decisions to honor:** QoS-1 + idempotent state-sets + dedupe-on-commandId (§5.5); timeout sweeper + status-guarded transition (§8, DB §5.8); `202` + polling, **no cancel** (API §8); idempotency key required; **operator control plane — `actuator_state` desired-vs-reported mirror (§4/§5.11), role+zone authorization, `409` safety interlock with audited `SUPER_ADMIN` override, `MANUAL_COMMAND`/`SAFETY_OVERRIDE` audit, command-parameter whitelist (§5.8/§7)**; manual command on the one pipeline, no parallel path (§5.8).
+**DoD:** issuing a command persists `PENDING`, upserts `actuator_state.desiredState`, publishes over MQTT, and returns `202`; acks drive the lifecycle to `SUCCESS/FAILED` and update `reportedState`; missing ack lands on `TIMEOUT`; re-issuing with the same `Idempotency-Key` returns the original record; a non-`ACTIVE`-actuator target or whitelist-violating params → `422`; an under-privileged or wrong-zone caller → `403`; a manual command contradicting an active safety action → `409`, overridable only by `SUPER_ADMIN` with `override`+`overrideReason` and a `SAFETY_OVERRIDE` audit entry; the toggle grid (`/actuator-state`) and drift view (`?drifted=true`) read from the mirror without touching `commands`.
+**Tests:** issue→publish→ack lifecycle + `actuator_state` desired/reported upserts; timeout sweep (+ status-guard race with ack); idempotency replay; duplicate-delivery harmlessness; invalid/non-`ACTIVE` target `422`; param-whitelist `422`; role+zone authorization matrix (`403` cases incl. device JWT rejected); safety-interlock `409` (manual command vs active smoke rule/open alert); `SUPER_ADMIN` override happy-path + `403`/`422` misuse; `MANUAL_COMMAND`/`SAFETY_OVERRIDE` audit assertions; actuator-state read (`?zone=`, `?drifted=true`, single-actuator `404`); cursor pagination + filters.
 
 ---
 
@@ -412,7 +425,7 @@ flowchart TB
 
 ## Coverage Matrix — REST operations → phase
 
-All 44 OpenAPI operations are accounted for.
+All 46 OpenAPI operations are accounted for.
 
 | # | Operation (`operationId`) | Method & path | Phase |
 |---|---|---|---|
@@ -460,6 +473,8 @@ All 44 OpenAPI operations are accounted for.
 | 42 | acknowledgeAlert | `POST /alerts/{alertId}:acknowledge` | 8 |
 | 43 | resolveAlert | `POST /alerts/{alertId}:resolve` | 8 |
 | 44 | queryAuditLogs | `GET /audit-logs` | 9 |
+| 45 | listActuatorState | `GET /actuator-state` | 6 |
+| 46 | getActuatorState | `GET /devices/{deviceId}/actuator-state` | 6 |
 
 ## Coverage Matrix — MQTT topics → phase
 
@@ -490,6 +505,11 @@ All 44 OpenAPI operations are accounted for.
 | Mandatory bounded window on partitioned reads (API §5, §10) | 4, 9 |
 | Command QoS-1 + idempotent state-sets + dedupe + timeout sweeper (§5.5, §8) | 6 |
 | `202` + polling, no cancel endpoint (API §8) | 6 |
+| Operator control plane on the one command pipeline, no parallel path (§5.8) | 6 |
+| `actuator_state` desired-vs-reported mirror (V3) + drift index; reads `GET /actuator-state`, `GET /devices/{id}/actuator-state` (§4/§5.11, API §6) | 6 |
+| Command authorization role + zone scoped; routine vs safety actuators; devices-ingest-only (§5.8/§7, API §8) | 6 |
+| Safety interlock `409` + audited `SUPER_ADMIN` override (`MANUAL_COMMAND`/`SAFETY_OVERRIDE`) (§5.8/§7, API §8) | 6 (interlock state wired with 7, 8) |
+| Optional zone-scoped operator grants `user_zone_grants` (V4) (DB §9, open question §11.7) | 6 (if adopted) |
 | Rule engine async off hot path; safe evaluator, no `eval` (§5.6) | 7 |
 | `rules → command/alert` via published interfaces (§9) | 6, 7, 8 |
 | Explicit alert transitions over writable status (API §10) | 8 |
@@ -519,6 +539,7 @@ Per the design docs' evolution notes and ⚠️ assumptions — add only when an
 - **Multi-tenant `tenantId`** on core tables + DTOs/filter (assumption #1). *Cheap to add now if multi-building is even plausible — decide before Phase 1.*
 - **WebSocket/SSE push** (`GET /v1/stream/state`) for sub-second liveness (assumption #4) — additive to polling.
 - **TimescaleDB hypertables + continuous aggregates** and `GET /v1/telemetry/aggregates` (assumption #3) — drop-in Postgres extension when charts dominate.
+- **Bulk / zone command control** (`POST /v1/commands:batch` — "turn off all lights in `office_1`"). Sugar that **fans out into N single-device commands** server-side, each keeping its own `commandId`, ack, audit, and safety-interlock check — never a second lifecycle (API §8/§12, system design §5.8). Add only if the operator UX needs it.
 - **Bulk admin ops** (`POST /v1/devices:batch-suspend`), **notification channels/hooks**, **durable rule queue (Kafka/Redis Streams)**, **service extraction** of `telemetry`+`rules`.
 
 ## Open questions to resolve before Phase 1 (System Design §11)
@@ -527,3 +548,9 @@ Per the design docs' evolution notes and ⚠️ assumptions — add only when an
 2. **Single vs multi-building** — if multi-tenant is ever possible, add `tenantId` now (near-free; painful to retrofit).
 3. **Dashboard liveness** — polling assumed; confirm before treating push as out of scope.
 4. **Broker product & HA** — Mosquitto (dev/simple) vs EMQX/HiveMQ (clustering, MQTT 5 shared subscriptions, richer ACLs); gates Phase 10 scaling choices.
+
+## Open questions to resolve before Phase 6 (operator control plane — System Design §11.5–7)
+
+5. **Control-command outcome delivery** (ties to #3) — confirm polling `GET /commands/{id}` is acceptable for the operator UX, or commit to SSE/WebSocket push now so toggles reflect terminal state without a poll loop.
+6. **Safety-override policy** — confirm the interlock rules: which actuators/`device_type`s count as "safety-critical", whether `SUPER_ADMIN` override is permitted at all, and what justification/confirmation it must capture.
+7. **Zone-scoped operator permissions** — global-per-role vs per-user zone grants. If zone-scoped, adopt `user_zone_grants` (**V4**) and the command-endpoint lookup *before* building Phase 6 authorization — cheap now, awkward to retrofit onto a live authorization path.

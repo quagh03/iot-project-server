@@ -25,9 +25,10 @@ The scale of an office building is bounded enough to design against directly. I'
 - Ingest sensor **telemetry** via MQTT (primary) and HTTP (fallback), through gateways that aggregate sensors.
 - Persist telemetry as **time-series history** and expose **current state** per zone/sensor.
 - **Device registry & lifecycle**: register, update, suspend, activate, decommission, rotate credentials (gateways, sensors, actuators).
-- **AuthN/AuthZ**: OAuth2 + JWT for users with RBAC (`SUPER_ADMIN`/`ADMIN`/`OPERATOR`/`VIEWER`); OAuth2 client-credentials + scopes for devices.
+- **AuthN/AuthZ**: OAuth2 + JWT for users with RBAC (`SUPER_ADMIN`/`ADMIN`/`OPERATOR`/`TECHNICIAN`/`VIEWER`); OAuth2 client-credentials + scopes for devices.
 - **Rule engine**: evaluate conditions over telemetry/state → dispatch commands and raise alerts (e.g. smoke → exhaust ON + alert).
 - **Command dispatch** to actuators over MQTT with a tracked lifecycle (`PENDING → RECEIVED → SUCCESS/FAILED/TIMEOUT`) and acknowledgement correlation.
+- **Operator device control** from the dashboard: authorized users issue control commands to actuators (turn on/off, set parameters), see **current actuator state**, and track each command's outcome — driven through the *same* command pipeline the rule engine uses, never a parallel path.
 - **Heartbeat / connectivity** tracking and device online/offline status.
 - **Audit logging** of security- and control-relevant events.
 - **REST APIs** for the dashboard and administration.
@@ -176,6 +177,7 @@ erDiagram
     DEVICES ||--o| DEVICE_CREDENTIALS : "authenticates with"
     DEVICES ||--o{ DEVICE_SCOPES : granted
     DEVICES ||--o| DEVICE_HEALTH : "latest health"
+    DEVICES ||--o| ACTUATOR_STATE : "latest actuator state"
     DEVICES ||--o{ SENSORS : "parent gateway of"
     DEVICES ||--o{ COMMANDS : "targets"
     USERS ||--o{ COMMANDS : "issued by"
@@ -253,6 +255,15 @@ erDiagram
         bool value_bool
         timestamptz ts
     }
+    ACTUATOR_STATE {
+        string device_id PK_FK
+        string desired_state "last commanded: ON|OFF|..."
+        string reported_state "last confirmed by device"
+        jsonb attributes "setpoint, level, mode"
+        string last_command_id FK
+        timestamptz commanded_at
+        timestamptz updated_at
+    }
     COMMANDS {
         string command_id PK
         string target_id FK
@@ -300,6 +311,7 @@ erDiagram
 
 - **`telemetry` has no foreign key to `devices`.** It's the high-volume append-only event log; FK checks on every insert cost throughput for little benefit, and device rows change slowly. Treat telemetry as immutable facts; validate device identity at ingest, not via a DB constraint.
 - **`sensor_latest` (or Redis) separates current state from history.** The dashboard's "what's the temperature in office_1 right now" must not scan the big telemetry table. Upsert the latest value per sensor on ingest. Trade-off: slight write amplification + the live view is eventually consistent by one sample — acceptable per the consistency targets.
+- **`actuator_state` is the control-plane mirror of `sensor_latest`.** The dashboard's toggles need "is this light/fan ON *right now*" without scanning `commands` history. Keep **`desired_state`** (what we last commanded) distinct from **`reported_state`** (what the device last confirmed via ack/telemetry): the gap between them *is* the in-flight / drift signal the UI renders ("turning on…", or "commanded ON but device reports OFF → investigate"). Upsert `desired_state` when a command is issued, `reported_state` on ack/telemetry. One row per actuator; history lives in `commands` + `telemetry`, not here.
 - **`device_health` is one row per device, upserted on heartbeat — not one row per heartbeat.** Storing every heartbeat is pure write amplification for data you rarely query historically. Keep *latest* health; if you ever need health history, add a short-retention (e.g. 7-day) partitioned table separately.
 - **Indexes that matter on `telemetry`:** `(sensor_id, ts DESC)` and `(zone, ts DESC)` — these back the two query shapes the dashboard actually issues. Don't over-index an append-heavy table.
 - **`refresh_tokens` is stored server-side** (hashed) on purpose — see §7 on why 30-day refresh tokens can't be purely stateless if you want revocation.
@@ -353,6 +365,41 @@ Covered in §4. Live reads hit `sensor_latest`/`device_health` (or Redis); histo
 | Live reads | State table / Redis | Scan telemetry | Dashboard latency | — |
 | Rule path | Async in-process | Sync inline / Kafka | Protect ingest, but no broker overhead | Replay / heavy rules → Kafka |
 | Command QoS | QoS 1 + idempotency | QoS 2 | QoS 2 is heavier; idempotency is cheaper insurance | — |
+| Control API | Async `202` + poll/push | Sync block-till-done | Device latency is unbounded; reuse existing lifecycle | Push needed → SSE/WS |
+
+### 5.8 Operator control plane — synchronous request, asynchronous outcome
+**Context:** the dashboard must let an authorized operator drive actuators directly (light/AC/exhaust on-off, setpoints) — the command path of §3/§5.5, now triggered by a human over REST instead of by a rule.
+
+**Decision:** the control endpoint is **command-*issuing*, not command-*completing***. `POST .../commands` validates → persists the command `PENDING` → publishes to MQTT → returns **`202 Accepted` with `{command_id, status: PENDING}`** immediately. It does **not** hold the HTTP request open waiting for the actuator. The front-end resolves the terminal state (`SUCCESS/FAILED/TIMEOUT`) by **polling `GET .../commands/{command_id}`** — which fits assumption #4's near-real-time polling — or, if/when push is adopted, over the *same* SSE/WebSocket channel that serves live state. The existing **timeout sweeper** (§5.5) guarantees the command always reaches a terminal state, so the UI's poll loop is bounded.
+
+```mermaid
+sequenceDiagram
+    participant FE as Frontend (operator)
+    participant API as REST API
+    participant C as Command Service
+    participant B as MQTT Broker
+    participant A as Actuator
+
+    FE->>API: POST /devices/{id}/commands {action, params, Idempotency-Key}
+    API->>C: validate (ACTIVE actuator, action whitelist, authZ)
+    C->>C: persist PENDING + upsert actuator_state.desired_state
+    C->>B: PUBLISH iot/command/{device_id} (QoS 1)
+    API-->>FE: 202 { command_id, status: PENDING }
+    loop until terminal (or sweeper TIMEOUT)
+        FE->>API: GET /commands/{command_id}
+        API-->>FE: { status: PENDING|RECEIVED|SUCCESS|FAILED|TIMEOUT }
+    end
+    B->>A: deliver command (QoS 1)
+    A->>C: ack updates command status and actuator_state.reported_state
+```
+
+**Buys:** the API stays responsive no matter how slow the device or broker is; reuses the whole lifecycle + sweeper + audit; no long-held connections.
+**Costs:** the UI must model an in-flight state ("turning on…") and reconcile to the terminal one — it cannot show success synchronously. That is the honest model for controlling physical hardware.
+**Cross-cutting controls (each detailed elsewhere):**
+- **Idempotency** — require an `Idempotency-Key` on issue so a double-click or client retry maps to **one** command (same mechanism as credential issue, §7).
+- **Target validation (`422`)** — target must be an **ACTIVE actuator**; reject sensors, gateways, and `SUSPENDED`/`DECOMMISSIONED` devices; action + params **whitelisted per `device_type`** (§7 input-validation table).
+- **Authorization & safety interlocks** — who may command what, and what happens when a manual command contradicts an active safety rule: §7.
+- **Bulk / zone control (deliberately optional):** "turn off all lights in `office_1`" is sugar that **fans out into N individual per-device commands** server-side — each still gets its own `command_id`, ack, and audit entry. Keep the unit of truth the single-device command; don't invent a second lifecycle for batches. Add only if the UX needs it.
 
 ---
 
@@ -456,13 +503,30 @@ The top three can cause physical harm; they get the strongest controls.
 ### Users
 - **OAuth2 + JWT.** Access token **1 h**, refresh token **30 d**.
 - **Passwords hashed with Argon2id** (BCrypt acceptable fallback). Never plaintext.
-- **RBAC** via roles in the JWT, enforced with method-level `@PreAuthorize` (`SUPER_ADMIN` > `ADMIN` > `OPERATOR` > `VIEWER`).
+- **RBAC** via roles in the JWT, enforced with method-level `@PreAuthorize` (`SUPER_ADMIN` > `ADMIN` > `OPERATOR` > `TECHNICIAN` > `VIEWER`). `TECHNICIAN` is a maintenance/field role slotted between `OPERATOR` and `VIEWER`: it reads all state and may command **routine** actuators in permitted zones for diagnostics/testing, but not safety actuators and never a safety override.
 - **Refresh-token revocation needs server-side state.** A pure stateless JWT can't be revoked before expiry — a 30-day refresh token you can't kill is a liability. Store refresh tokens hashed (`refresh_tokens` table), rotate on use (issue new, revoke old), and support explicit revoke on logout/compromise. Access tokens stay stateless and short-lived, but the **denylist below** gives them instant revocation when waiting up to an hour isn't acceptable.
 
 ### Devices
 - **OAuth2 client-credentials**, one `client_id`/`client_secret` per device; **secret stored hashed**, never returned again after issue/rotation.
 - **Scopes** (`telemetry:publish`, `command:subscribe`, `command:ack`, `heartbeat:publish`) gate what each device may do.
 - **Credential rotation with a grace window:** keep `previous_secret_hash` valid briefly after rotation so a device doesn't get locked out mid-roll. Audit every rotation.
+
+### Operator control authorization & safety interlocks
+Exposing device control to the dashboard widens the **Elevation-of-Privilege** surface (T4): a control command is a physical action, so *who* may issue *what* is a first-class authorization decision, enforced with `@PreAuthorize` at the command endpoint — never in the UI.
+
+| Role | May read state | May command routine actuators (light, AC, curtain) | May command safety actuators (exhaust fan, smoke-linked) | May override an active safety rule/alert |
+|---|---|---|---|---|
+| `VIEWER` | ✅ | ✗ | ✗ | ✗ |
+| `TECHNICIAN` | ✅ | ✅ (permitted zones — diagnostics/testing) | ✗ | ✗ |
+| `OPERATOR` | ✅ | ✅ (permitted zones) | ✅ (turn **ON** / escalate only) | ✗ |
+| `ADMIN` | ✅ | ✅ | ✅ | ✗ |
+| `SUPER_ADMIN` | ✅ | ✅ | ✅ | ✅ (explicit, confirmed, audited) |
+
+`TECHNICIAN` mirrors `OPERATOR`'s routine-actuator authority (zone-scoped, for maintenance/testing) but is barred from **safety** actuators — only `OPERATOR`+ may drive an exhaust/smoke-linked device. Like everyone below `SUPER_ADMIN`, a `TECHNICIAN` command is still subject to the safety interlock below.
+
+**Safety interlock — the rule engine outranks manual control.** Because this is a safety system, a manual command that *contradicts* an active safety action (e.g. operator sends `exhaust OFF` while a smoke rule holds it `ON`, or an `OPEN` smoke alert exists for that zone) is **rejected `409`/`safety-interlock`** for everyone below `SUPER_ADMIN` — and even there it requires an explicit override flag + reason, and is audited as a distinct `SAFETY_OVERRIDE` event. Degradation stays **fail-safe** (§"Availability as a security property"): manual control can always move an actuator *toward* the safe state, never silently away from one the system is actively enforcing.
+
+**Every manual command is audited** with actor, actor-type `USER`, source IP, target, action, and `command_id` (§Audit) — manual control is exactly the kind of control-relevant event that must be non-repudiable. Manual commands are also subject to the per-user rate limit (§Rate limiting), which doubles as abuse detection on the control path.
 
 ### Token revocation (denylist)
 The DB `revoked` flag on `refresh_tokens` is authoritative; the denylist is a **fast-deny layer in front of it** that closes two gaps the flag alone can't: (a) revoking a stateless **access** token before its natural expiry, and (b) avoiding a DB round-trip on every refresh.
@@ -624,6 +688,9 @@ This document doesn't restate the wire contracts — they live in the data spec 
 2. **Single vs multi-building** (assumption #1) — if multi-tenant is even *possible* later, add a `tenant_id` to the core tables now; it's nearly free upfront and painful to retrofit.
 3. **Dashboard liveness** (assumption #4) — polling is fine for "near-real-time"; if you need push, plan WebSocket/SSE and treat the live-state cache as first-class.
 4. **Broker product & HA** — Mosquitto (simple, single-node) vs EMQX/HiveMQ (clustering, MQTT 5 shared subscriptions, richer ACLs). The §8 scaling step 5 depends on this.
+5. **Control-command outcome delivery** (ties to #3) — confirm polling `GET /commands/{id}` is acceptable for the operator UX, or commit to SSE/WebSocket push now so toggles reflect terminal state without a poll loop.
+6. **Safety-override policy** (§5.8 / §7) — confirm the interlock rules: which actuators count as "safety-critical," whether `SUPER_ADMIN` override is even permitted, and what confirmation/justification it must capture.
+7. **Zone-scoped operator permissions** — is control authority global per role, or scoped to specific zones per user? If zone-scoped, the authorization model needs a user↔zone grant table (cheap now, awkward to retrofit).
 
 ---
 

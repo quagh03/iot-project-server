@@ -8,7 +8,7 @@ This document turns the system design's data model and the API's wire contracts 
 
 ## 1. Domain model
 
-The platform tracks ten core "things" plus two cross-cutting concerns:
+The platform tracks eleven core "things" plus two cross-cutting concerns:
 
 | Entity | Purpose | Volume / growth |
 |---|---|---|
@@ -21,11 +21,14 @@ The platform tracks ten core "things" plus two cross-cutting concerns:
 | **device_health** | **Latest** health/connectivity per device — upserted, not appended. | One row per device. |
 | **telemetry** | Append-only time-series readings. **The one table that grows.** | ~160 M rows/year. |
 | **sensor_latest** | Latest reading per sensor — the dashboard hot path. | One row per sensor. |
+| **actuator_state** 🆕 | Latest desired-vs-reported state per actuator — the **operator control** hot path. | One row per actuator. |
 | **commands** | Actuator commands with `PENDING → … → SUCCESS/FAILED/TIMEOUT` lifecycle. | Low; a few/minute. |
 | **rules** | Stored rule conditions/actions evaluated asynchronously. | Tens of rows. |
 | **alerts** | Raised alerts with `OPEN → ACK → RESOLVED` transitions. | Low, event-driven. |
 | **audit_logs** | Append-only security/control event log. | Grows, slower than telemetry. |
 | **idempotency_keys** | Stores `POST` results for safe retry within 24 h. | Short-lived, TTL-pruned. |
+
+> 🆕 **What changed in this revision** — the *Operator Device Control* update (system design §1, §4, §5.8, §7) adds the **`actuator_state`** table below and an **optional `user_zone_grants`** table (§9). No other table changes: manual commands reuse the existing `commands` lifecycle and `idempotency_keys`; the new `MANUAL_COMMAND` / `SAFETY_OVERRIDE` events are plain `audit_logs` rows (the `event` column is free-form `VARCHAR`, so no migration). Live deltas ship as **Flyway `V3` / `V4`** (§10).
 
 The governing access patterns (from system design §4): **append telemetry fast**; read **latest value per sensor** and **device online/offline** cheaply; query **telemetry by sensor or zone over a time range**; transactional **registry / RBAC / command** updates; append-only **audit** and **idempotent retries**.
 
@@ -39,9 +42,12 @@ erDiagram
     DEVICES ||--o| DEVICE_CREDENTIALS : "authenticates with"
     DEVICES ||--o{ DEVICE_SCOPES : "granted"
     DEVICES ||--o| DEVICE_HEALTH : "latest health"
+    DEVICES ||--o| ACTUATOR_STATE : "latest actuator state"
     DEVICES ||--o{ SENSORS : "parent gateway of"
     DEVICES ||--o{ DEVICES : "parent_gateway_id (self-ref)"
     DEVICES ||--o{ COMMANDS : "targets"
+    COMMANDS ||--o| ACTUATOR_STATE : "last command of"
+    USERS ||--o{ USER_ZONE_GRANTS : "granted zones (optional §9)"
     DEVICES ||--o{ ALERTS : "source"
 
     USERS {
@@ -124,6 +130,21 @@ erDiagram
         boolean value_bool
         varchar unit
         timestamptz ts
+    }
+    ACTUATOR_STATE {
+        varchar device_id PK_FK
+        varchar desired_state "last commanded: ON|OFF|..."
+        varchar reported_state "last confirmed by device"
+        jsonb attributes "setpoint, level, mode"
+        varchar last_command_id FK "ON DELETE SET NULL"
+        timestamptz commanded_at
+        timestamptz updated_at
+    }
+    USER_ZONE_GRANTS {
+        uuid user_id PK_FK "optional — see §9"
+        varchar zone PK
+        varchar granted_by
+        timestamptz granted_at
     }
     COMMANDS {
         varchar command_id PK
@@ -212,8 +233,8 @@ CREATE TABLE users (
     id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     username      VARCHAR(64)  NOT NULL,
     password_hash VARCHAR(255) NOT NULL,                  -- argon2id encoded string
-    role          VARCHAR(16)  NOT NULL
-                    CHECK (role IN ('SUPER_ADMIN','ADMIN','OPERATOR','VIEWER')),
+    role          VARCHAR(16)  NOT NULL                    -- TECHNICIAN added in V2 (between OPERATOR and VIEWER)
+                    CHECK (role IN ('SUPER_ADMIN','ADMIN','OPERATOR','TECHNICIAN','VIEWER')),
     status        VARCHAR(16)  NOT NULL DEFAULT 'ACTIVE'
                     CHECK (status IN ('ACTIVE','DISABLED')),  -- DISABLED = soft delete
     version       INTEGER      NOT NULL DEFAULT 0,        -- optimistic lock
@@ -394,6 +415,37 @@ CREATE INDEX idx_commands_open ON commands (issued_at)
     WHERE status IN ('PENDING','RECEIVED');
 
 -- =====================================================================
+-- ACTUATOR STATE — control-plane mirror of sensor_latest, one row/actuator
+--   (created after commands: last_command_id references it)
+-- =====================================================================
+
+CREATE TABLE actuator_state (
+    device_id       VARCHAR(64)  PRIMARY KEY
+                      REFERENCES devices(device_id) ON DELETE CASCADE,
+    desired_state   VARCHAR(32)  NULL,                          -- last commanded: ON|OFF|OPEN|... (app-whitelisted per device_type)
+    reported_state  VARCHAR(32)  NULL,                          -- last device-confirmed via ack/telemetry
+    attributes      JSONB        NOT NULL DEFAULT '{}'::jsonb,  -- setpoint, level, mode
+    last_command_id VARCHAR(64)  NULL
+                      REFERENCES commands(command_id) ON DELETE SET NULL,
+    commanded_at    TIMESTAMPTZ  NULL,                          -- set when a command is issued
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()         -- touched on every state change
+    -- "Actuator only" is enforced at the app layer (API 422), not a CHECK:
+    -- a Postgres CHECK cannot reference devices.category across tables.
+);
+-- Surfaces actuators whose desired/reported states disagree (in-flight or drifted)
+-- for an operator "needs attention" view. Tiny partial index on a low-volume table.
+CREATE INDEX idx_actuator_state_drift ON actuator_state (updated_at)
+    WHERE desired_state IS DISTINCT FROM reported_state;
+-- Upsert on command issue:
+--   INSERT INTO actuator_state (device_id, desired_state, last_command_id, commanded_at, updated_at)
+--   VALUES (?, ?, ?, now(), now())
+--   ON CONFLICT (device_id) DO UPDATE SET
+--       desired_state = EXCLUDED.desired_state, last_command_id = EXCLUDED.last_command_id,
+--       commanded_at = EXCLUDED.commanded_at, updated_at = now();
+-- Upsert on ack/telemetry:
+--   ... DO UPDATE SET reported_state = EXCLUDED.reported_state, updated_at = now();
+
+-- =====================================================================
 -- RULES
 -- =====================================================================
 
@@ -530,6 +582,18 @@ The system design models `protocols` as a string array; we keep a native `TEXT[]
 ### 5.10 `users` soft delete via `status = 'DISABLED'`
 The API's `DELETE /users/{id}` sets status `DISABLED` and revokes refresh tokens — there's no hard delete and no separate `deleted_at`. `DISABLED` *is* the soft-delete marker, so every "active users" query filters `status = 'ACTIVE'`.
 
+### 5.11 `actuator_state` — desired vs reported, mirror not history 🆕
+**Decision:** one upserted row per actuator, holding **`desired_state`** (what we last commanded) *distinct from* **`reported_state`** (what the device last confirmed via ack/telemetry). It is the control-plane twin of `sensor_latest`: it keeps the dashboard's "is this light/fan ON *right now*" read off the `commands` history table.
+**Buys:** the gap `desired_state ≠ reported_state` *is* the in-flight / drift signal the UI renders ("turning on…", "commanded ON but reports OFF → investigate"); the `< 300 ms` toggle-grid read never scans `commands`. The partial drift index makes the operator "needs attention" view cheap.
+**Costs / trade-offs:**
+- **No cross-table "actuator-only" CHECK.** A Postgres `CHECK` can't reference `devices.category`, so the rule "target must be an `ACTIVE` actuator" is enforced at the API (`422`), exactly as the system design §5.8 specifies — same pattern as `telemetry`/`sensor_latest` having no FK-enforced sensor-ness.
+- **`last_command_id` FK → `commands` is `ON DELETE SET NULL`**, not `RESTRICT`: the mirror points at the *latest* command for traceability but must never block command pruning. Full history stays in `commands` + `telemetry`, never here.
+- **No `zone` column (unlike `sensor_latest`).** Actuators are low-cardinality (hundreds), so a zone-filtered toggle grid joins `devices` (already indexed on `zone`) cheaply — no need to denormalize zone onto a write path that, unlike telemetry, isn't hot. Denormalize later only if the join shows up in profiling.
+- **`desired_state`/`reported_state` are free `VARCHAR(32)`, no `CHECK`.** Valid values vary per `device_type` (`ON/OFF`, `OPEN/CLOSED`, setpoint modes), so the whitelist lives in the app's per-`device_type` validation, not a DB enum.
+
+### 5.12 Manual control adds *no* new lifecycle or audit schema 🆕
+Operator commands flow through the **existing** `commands` table and state machine (§5.8) — a human issuer is just a `commands.issued_by` = user-id (the polymorphic column of §5.7). The `Idempotency-Key` on `POST /commands` reuses `idempotency_keys`. The new control-relevant events — `MANUAL_COMMAND` and `SAFETY_OVERRIDE` (system design §7) — are ordinary `audit_logs` rows; `event` is a free-form `VARCHAR(64)`, so capturing them needs **no migration**. The only genuinely new structures are `actuator_state` (§5.11) and the optional `user_zone_grants` (§9).
+
 ---
 
 ## 6. Access-pattern notes (indexes that matter)
@@ -545,6 +609,9 @@ The API's `DELETE /users/{id}` sets status `DISABLED` and revokes refresh tokens
 | `GET /devices/{id}/sensors` | `sensors` | `(gateway_id)` |
 | `GET /commands?targetId=&from=&to=` | `commands` | `(target_id, issued_at DESC)` |
 | Timeout sweeper | `commands` | partial `(issued_at) WHERE status IN ('PENDING','RECEIVED')` |
+| `GET /devices/{id}/actuator-state` (toggle UI) 🆕 | `actuator_state` | PK |
+| `GET /actuator-state?zone=` (toggle grid) 🆕 | `actuator_state` ⋈ `devices` | `devices(zone)` (join; actuators low-cardinality) |
+| Operator "needs attention" (desired ≠ reported) 🆕 | `actuator_state` | partial `(updated_at) WHERE desired_state IS DISTINCT FROM reported_state` |
 | `GET /alerts?status=&zone=&from=&to=` | `alerts` | `(status, created_at DESC)`, `(zone)` |
 | `GET /audit-logs?actor=&event=&from=&to=` | `audit_logs` (partition-pruned) | `(actor, ts)`, `(event, ts)`, `(target, ts)` |
 | Login / refresh | `users`, `refresh_tokens` | `users(username)` UK, `refresh_tokens(token_hash)` UK |
@@ -594,6 +661,74 @@ Resolve `tenant_id` from the JWT and set it per request (`SET LOCAL app.tenant_i
 
 ---
 
-## 9. Summary verdict
+## 9. Optional: zone-scoped operator permissions (open question #7) 🆕
 
-✅ **The schema matches the architecture's grain.** It implements the system design's load-bearing decisions — the current-state/history split, FK-free high-volume telemetry, monthly partitioning with retention-by-drop, the command state machine, hashed/rotating credentials with a grace slot, and append-only partitioned audit — and the API's contracts (opaque string IDs, numeric-XOR-boolean readings, mandatory time-window scoping on partitioned reads, idempotent retries). The two genuine watch-items inherited from the design remain operational, not schema-level: **telemetry growth** (handled by partitioning + retention here) and the **MQTT broker SPOF** (outside the database). The only schema judgement calls worth a second look before build are the **`protocols` array vs junction table** (§5.9) and whether to **add `tenant_id` now** (§8).
+The system design's control-authorization matrix (§7) lets an `OPERATOR` command actuators **"(permitted zones)"** — which only means something if the DB records *which* zones each operator may drive. Today authority is global-per-role (role lives on `users`); zone-scoping is **open question §11.7**. The brief's guidance: it's *"cheap upfront, painful to retrofit,"* so decide before build.
+
+**Recommendation: add `user_zone_grants` now** if zone-scoped operator authority is even plausibly wanted — it's a tiny junction table and back-filling it onto a live authorization path later is awkward. If authority will stay strictly global-per-role, skip it.
+
+```sql
+-- Many-to-many users ↔ zones. Composite PK (no surrogate needed for a pure grant row).
+-- granted_by/at make each grant attributable — it is a security-relevant change.
+CREATE TABLE user_zone_grants (
+    user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    zone       VARCHAR(64) NOT NULL,
+    granted_by VARCHAR(64) NOT NULL,                 -- actor that issued the grant (audit)
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, zone)
+);
+-- "Who may drive zone X?" and grant-revocation reads.
+CREATE INDEX idx_user_zone_grants_zone ON user_zone_grants (zone);
+```
+
+**Semantics.** Empty/absent grants for a user = no zone-scoped authority (deny by default); the check is `@PreAuthorize` *plus* a `user_zone_grants` lookup at the command endpoint, never in the UI. `ADMIN`/`SUPER_ADMIN` bypass the zone filter (they command any zone per the §7 matrix), so the table is consulted only for `OPERATOR` and `TECHNICIAN` (both zone-scoped for routine actuators; `TECHNICIAN` cannot command safety actuators at all). Granting/revoking a zone is itself an audited event (`ZONE_GRANT` / `ZONE_REVOKE` in `audit_logs`). This is **not** in the core DDL above and ships as Flyway `V4` only if adopted (§10).
+
+---
+
+## 10. Flyway migrations 🆕
+
+Migrations live in `src/main/resources/db/migration` and follow `V<n>__<desc>.sql`. Existing baseline: **`V1__init_schema.sql`** (all core tables) and **`V2__add_technician_role.sql`** (adds `TECHNICIAN` to `users.role`). The operator-control update adds:
+
+| Version | File | Contents | Status |
+|---|---|---|---|
+| **V3** | `V3__add_actuator_state.sql` | `actuator_state` table + drift partial index | **Created** — required for operator control |
+| **V4** | `V4__add_user_zone_grants.sql` | `user_zone_grants` table + zone index | **Optional** — only if zone-scoped authority is adopted (§9) |
+
+`V3` is ordered after `commands` (created in `V1`) because `actuator_state.last_command_id` references it — Flyway applies `V1 → V2 → V3` in order, so the dependency is satisfied. Both are pure additive `CREATE TABLE`s: no backfill, no lock on existing hot tables, safe to apply online.
+
+```sql
+-- V3__add_actuator_state.sql  (created in the repo)
+CREATE TABLE actuator_state (
+    device_id       VARCHAR(64)  PRIMARY KEY
+                      REFERENCES devices(device_id) ON DELETE CASCADE,
+    desired_state   VARCHAR(32)  NULL,
+    reported_state  VARCHAR(32)  NULL,
+    attributes      JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    last_command_id VARCHAR(64)  NULL
+                      REFERENCES commands(command_id) ON DELETE SET NULL,
+    commanded_at    TIMESTAMPTZ  NULL,
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_actuator_state_drift ON actuator_state (updated_at)
+    WHERE desired_state IS DISTINCT FROM reported_state;
+```
+
+```sql
+-- V4__add_user_zone_grants.sql  (write only if §9 is adopted)
+CREATE TABLE user_zone_grants (
+    user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    zone       VARCHAR(64) NOT NULL,
+    granted_by VARCHAR(64) NOT NULL,
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, zone)
+);
+CREATE INDEX idx_user_zone_grants_zone ON user_zone_grants (zone);
+```
+
+> **Note — no migration needed for audit.** The new `MANUAL_COMMAND` / `SAFETY_OVERRIDE` (and, with §9, `ZONE_GRANT` / `ZONE_REVOKE`) events are plain `audit_logs` rows; `event VARCHAR(64)` already accepts them. Likewise manual commands and their `Idempotency-Key` reuse `commands` and `idempotency_keys` unchanged.
+
+---
+
+## 11. Summary verdict
+
+✅ **The schema matches the architecture's grain.** It implements the system design's load-bearing decisions — the current-state/history split, FK-free high-volume telemetry, monthly partitioning with retention-by-drop, the command state machine, hashed/rotating credentials with a grace slot, and append-only partitioned audit — and the API's contracts (opaque string IDs, numeric-XOR-boolean readings, mandatory time-window scoping on partitioned reads, idempotent retries). The **operator control plane** (this revision) slots in cleanly: one new mirror table (`actuator_state`, §5.11) reusing the existing command lifecycle, audit, and idempotency machinery with no churn to hot tables (§5.12). The two genuine watch-items inherited from the design remain operational, not schema-level: **telemetry growth** (handled by partitioning + retention here) and the **MQTT broker SPOF** (outside the database). The schema judgement calls worth a second look before build are the **`protocols` array vs junction table** (§5.9), whether to **add `tenant_id` now** (§8), and whether to **adopt zone-scoped operator grants** (§9 / `V4`).

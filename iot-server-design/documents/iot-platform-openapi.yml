@@ -32,8 +32,8 @@ info:
     - **Auth:** `Authorization: Bearer <access_token>` on every request
       except `POST /auth/login`, `POST /auth/refresh`, and
       `POST /oauth2/token`. Users carry a stateless JWT (1 h) with role
-      (`SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`); devices carry an OAuth2
-      client-credentials token gated by scopes.
+      (`SUPER_ADMIN > ADMIN > OPERATOR > TECHNICIAN > VIEWER`); devices carry
+      an OAuth2 client-credentials token gated by scopes.
     - **Pagination:** cursor-based for large/append-only or time-ordered
       sets (telemetry, commands, alerts, audit-logs); offset-based for
       small/stable admin sets (devices, users, rules, sensors). `pageSize`
@@ -92,9 +92,10 @@ tags:
   - name: Users
     description: >
       Operator accounts and RBAC. Role hierarchy `SUPER_ADMIN > ADMIN >
-      OPERATOR > VIEWER`. `SUPER_ADMIN` is required to grant
-      `ADMIN`/`SUPER_ADMIN`; `ADMIN` may manage `OPERATOR`/`VIEWER`. Every
-      role/status change writes an audit log entry.
+      OPERATOR > TECHNICIAN > VIEWER`. `SUPER_ADMIN` is required to grant
+      `ADMIN`/`SUPER_ADMIN`; `ADMIN` may manage
+      `OPERATOR`/`TECHNICIAN`/`VIEWER`. Every role/status change writes an
+      audit log entry.
   - name: Devices
     description: >
       Device registry and explicit lifecycle transitions. Lifecycle changes
@@ -121,6 +122,14 @@ tags:
       device online", served from `sensor_latest` / `device_health`, never
       from the telemetry partitions. **Eventually consistent by one sample** —
       the live view may lag the freshest reading.
+  - name: Actuator State
+    description: >
+      Control-plane mirror of current state, backing the dashboard's toggle
+      grid. Keeps `desiredState` (last commanded) distinct from
+      `reportedState` (last device-confirmed) — the gap is the in-flight /
+      drift signal the UI renders. These are **reads** for `VIEWER`+;
+      *commanding* an actuator is the more privileged Commands path. Served
+      from `actuator_state`, never from the `commands` history table.
   - name: Heartbeat
     description: >
       HTTP fallback connectivity upsert when MQTT/LWT is unavailable. Updates
@@ -129,11 +138,17 @@ tags:
   - name: Commands
     description: >
       Actuator command issue and lifecycle status (`PENDING → RECEIVED →
-      SUCCESS/FAILED/TIMEOUT`). Acks arrive over MQTT
-      (`iot/command_ack/{device_id}`), not REST — this surface only issues and
-      reports. Commands are **idempotent state-sets** (`SET status=ON`, not
-      `TOGGLE`); a redelivery is harmless. There is **no cancel/delete** — to
-      undo, issue the inverse state-set.
+      SUCCESS/FAILED/TIMEOUT`). The **operator control plane** rides this same
+      single pipeline — an operator-issued command is just a row whose
+      `issuedBy` is a user id; there is no parallel manual path. Acks arrive
+      over MQTT (`iot/command_ack/{device_id}`), not REST — this surface only
+      issues and reports. Commands are **idempotent state-sets**
+      (`SET status=ON`, not `TOGGLE`); a redelivery is harmless. There is **no
+      cancel/delete** — to undo, issue the inverse state-set. Authorization is
+      role + zone scoped (routine vs safety actuators); a manual command that
+      contradicts an active safety rule is rejected `409`
+      (`.../errors/safety-interlock`), overridable only by `SUPER_ADMIN` with
+      an explicit, audited reason.
   - name: Rules
     description: >
       Rule engine CRUD. `condition`/`action` are validated **on write**
@@ -819,6 +834,61 @@ paths:
               schema: { $ref: '#/components/schemas/ConnectivitySummary' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  # ------------------------------------------------------------- Actuator state
+  /actuator-state:
+    get:
+      tags: [Actuator State]
+      summary: Desired-vs-reported state per actuator
+      description: >
+        Toggle-grid hot path. Returns one row per actuator with `desiredState`
+        (last commanded) and `reportedState` (last device-confirmed). Set
+        `?drifted=true` for the operator "needs attention" view — only rows
+        where `desiredState ≠ reportedState`, served by the partial drift
+        index, never a scan. `?zone=` filters the grid (resolved by joining
+        `devices`; `zone` is not stored on the mirror). **Eventually
+        consistent by one sample.** Min role `VIEWER`.
+      operationId: listActuatorState
+      parameters:
+        - $ref: '#/components/parameters/ZoneFilter'
+        - name: drifted
+          in: query
+          description: When `true`, return only actuators whose desired and reported states disagree (in-flight or drifted).
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Latest actuator states.
+          headers:
+            Cache-Control: { schema: { type: string }, description: Short max-age for polling clients. }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ActuatorState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /devices/{deviceId}/actuator-state:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      tags: [Actuator State]
+      summary: Desired-vs-reported state for one actuator
+      description: >
+        Single-actuator variant for the toggle UI. A `deviceId` that is not an
+        actuator, or has no state row yet, → `404`. Eventually consistent by
+        one sample. Min role `VIEWER`.
+      operationId: getActuatorState
+      responses:
+        '200':
+          description: Actuator state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActuatorState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   # ---------------------------------------------------------------- Heartbeat
   /heartbeat:
     post:
@@ -892,10 +962,32 @@ paths:
         so a redelivery is harmless. There is deliberately **no cancel /
         delete** — a command in flight cannot be recalled; issue the inverse
         state-set instead. Commands with no ack within the window are swept
-        to `TIMEOUT` server-side.
+        to `TIMEOUT` server-side. Issuing also upserts
+        `actuator_state.desiredState` so the toggle grid reflects intent
+        immediately; the device ack later sets `reportedState`.
 
-        Targeting a non-actuator or a `DECOMMISSIONED` device → `422`. Min
-        role `OPERATOR`. Audited.
+        **Validation (`422`):** the target must be an **`ACTIVE` actuator** —
+        a sensor/gateway, or an `INACTIVE`/`SUSPENDED`/`DECOMMISSIONED` device,
+        is rejected; `action` + `parameters` must match the per-`deviceType`
+        whitelist (no free-form passthrough — injection defense).
+
+        **Authorization (`403`):** role + zone scoped. Roles split actuators
+        into routine (light/AC/curtain) and safety (exhaust/smoke-linked);
+        `VIEWER` cannot command, `OPERATOR` may drive routine actuators in
+        permitted zones and turn safety actuators ON/escalate, `ADMIN` any
+        actuator, `SUPER_ADMIN` additionally may override safety rules.
+        `OPERATOR` zone scope is checked against `user_zone_grants` if adopted.
+
+        **Safety interlock (`409`):** a manual command that contradicts an
+        active safety action (e.g. `exhaust OFF` while a smoke rule holds it
+        `ON`) is rejected with type `.../errors/safety-interlock` for everyone
+        below `SUPER_ADMIN`. `SUPER_ADMIN` may override only with
+        `override: true` + a non-empty `overrideReason`, which logs a distinct
+        `SAFETY_OVERRIDE` audit event. Every manual command writes a
+        `MANUAL_COMMAND` audit entry and counts against the per-user rate
+        limit.
+
+        Min role `OPERATOR`. Audited.
       operationId: issueCommand
       parameters:
         - $ref: '#/components/parameters/IdempotencyKeyRequired'
@@ -914,6 +1006,7 @@ paths:
               schema: { $ref: '#/components/schemas/CommandAck' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
@@ -1205,7 +1298,7 @@ components:
       bearerFormat: JWT
       description: >
         User JWT access token (1 h). Carries role
-        (`SUPER_ADMIN | ADMIN | OPERATOR | VIEWER`) for RBAC. Refresh via
+        (`SUPER_ADMIN | ADMIN | OPERATOR | TECHNICIAN | VIEWER`) for RBAC. Refresh via
         `POST /auth/refresh` (rotating refresh token, 30-day expiry, server
         revocable).
     deviceOAuth:
@@ -1347,7 +1440,10 @@ components:
     Conflict:
       description: >
         State conflict — duplicate id, illegal lifecycle transition, version
-        conflict, or attempt to acknowledge/resolve an alert in a wrong state.
+        conflict, attempt to acknowledge/resolve an alert in a wrong state, or
+        a command rejected by the safety interlock
+        (`.../errors/safety-interlock`) because it contradicts an active
+        safety rule.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -1414,10 +1510,13 @@ components:
     Role:
       type: string
       description: >
-        Hierarchical role. `SUPER_ADMIN > ADMIN > OPERATOR > VIEWER`.
-        `SUPER_ADMIN` may grant `ADMIN`/`SUPER_ADMIN`; `ADMIN` manages
-        `OPERATOR`/`VIEWER`.
-      enum: [SUPER_ADMIN, ADMIN, OPERATOR, VIEWER]
+        Hierarchical role. `SUPER_ADMIN > ADMIN > OPERATOR > TECHNICIAN >
+        VIEWER`. `SUPER_ADMIN` may grant `ADMIN`/`SUPER_ADMIN`; `ADMIN`
+        manages `OPERATOR`/`TECHNICIAN`/`VIEWER`. `TECHNICIAN` is a
+        maintenance/field role between `OPERATOR` and `VIEWER`: it reads all
+        state and may command routine actuators in permitted zones, but not
+        safety actuators and never a safety override.
+      enum: [SUPER_ADMIN, ADMIN, OPERATOR, TECHNICIAN, VIEWER]
     UserStatus:
       type: string
       description: >
@@ -1673,6 +1772,30 @@ components:
           description: Bounded list of offline device ids; large fleets should drill in per-device.
           items: { type: string }
 
+    # ----- actuator state
+    ActuatorState:
+      type: object
+      description: >
+        Control-plane mirror for one actuator (the `actuator_state` row).
+        `desiredState` is what was last commanded; `reportedState` is what the
+        device last confirmed via ack/telemetry. Their gap is the in-flight /
+        drift signal the toggle UI renders. Eventually consistent by one
+        sample.
+      properties:
+        deviceId: { type: string, description: Actuator `deviceId`. }
+        zone: { type: string, description: Resolved from the device registry (not stored on the mirror). }
+        desiredState: { type: string, nullable: true, description: "Last commanded state (e.g. `ON`, `OFF`, `OPEN`); null if never commanded." }
+        reportedState: { type: string, nullable: true, description: Last device-confirmed state; null until the first ack/telemetry. }
+        inFlight: { type: boolean, description: "Server-computed convenience: `desiredState != reportedState` — a command in flight or a drift to investigate." }
+        attributes:
+          type: object
+          additionalProperties: true
+          description: "Structured actuator attributes (e.g. setpoint, level, mode)."
+          example: { level: 3, mode: auto }
+        lastCommandId: { type: string, nullable: true, description: "`commandId` of the most recent command targeting this actuator (traceability; null if pruned)." }
+        commandedAt: { type: string, format: date-time, nullable: true, description: When the last command was issued. }
+        updatedAt: { type: string, format: date-time, description: When this mirror row last changed (command issue or ack). }
+
     # ----- heartbeat
     HeartbeatRequest:
       type: object
@@ -1695,11 +1818,11 @@ components:
         (`SET status=ON`), not deltas (`TOGGLE`), so MQTT QoS-1 redeliveries
         are harmless. `action` and `parameters` are **whitelisted** against
         the actuator's contract (injection defense — no free-form passthrough
-        to the device); unknown actions/params, or targeting a non-actuator or
-        `DECOMMISSIONED` device → `422`.
+        to the device); unknown actions/params, or targeting a non-`ACTIVE`
+        actuator → `422`.
       required: [targetId, type, action]
       properties:
-        targetId: { type: string, description: Actuator `deviceId`. }
+        targetId: { type: string, description: Actuator `deviceId` — must be an `ACTIVE` actuator. }
         type: { type: string, example: actuator }
         action: { type: string, example: SET, description: Verb in the actuator's contract (typically `SET`). }
         parameters:
@@ -1707,6 +1830,18 @@ components:
           additionalProperties: true
           description: Action arguments — shape per actuator contract.
           example: { status: ON }
+        override:
+          type: boolean
+          default: false
+          description: >
+            Safety-override flag. Only `SUPER_ADMIN` may set `true`, and only
+            to issue a command the safety interlock would otherwise reject
+            (`409`). Requires `overrideReason`. Set by a lower role → `403`.
+        overrideReason:
+          type: string
+          description: >
+            Mandatory justification when `override` is `true`; recorded on the
+            `SAFETY_OVERRIDE` audit event. Missing while `override=true` → `422`.
     CommandAck:
       type: object
       description: Response on issue. Status is always `PENDING` here — the actuator effect is async.
