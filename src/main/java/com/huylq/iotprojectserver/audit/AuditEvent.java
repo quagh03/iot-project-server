@@ -48,6 +48,10 @@ public enum AuditEvent {
   RULE_PATCH("rule.patch"),
   RULE_DELETE("rule.delete"),
 
+  // ---- alerts (Phase 8) ---------------------------------------------------------------
+  ALERT_ACKNOWLEDGE("alert.acknowledge"),
+  ALERT_RESOLVE("alert.resolve"),
+
   // ---- system (PartitionManager, retention sweeper, scheduled jobs) ------------------
   PARTITION_CREATED("partition.created"),
   PARTITION_DROPPED("partition.dropped");
