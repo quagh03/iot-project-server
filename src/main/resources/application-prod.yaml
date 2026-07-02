@@ -7,6 +7,13 @@ spring:
       maximum-pool-size: ${DB_POOL_SIZE:20}
   jpa:
     show-sql: false
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      ssl:
+        enabled: ${REDIS_TLS_ENABLED:true}
 
 server:
   forward-headers-strategy: framework
@@ -24,7 +31,20 @@ logging:
 iot:
   security:
     jwt:
-      secret: ${JWT_SECRET}
+      # KMS-injected at runtime — never in source (§7 secrets table). ACTIVE_KID/*_PEM
+      # env vars are expected to be populated from the secrets manager at container
+      # start, not baked into the image. See the ops runbook for the rotation procedure:
+      # publish the new key as "retired" everywhere first, cut over ACTIVE_*, then drop
+      # the old key from JWT_RETIRED_KEYS_JSON only after its longest-lived token (30d
+      # refresh token) has naturally expired.
+      keys:
+        active-kid: ${JWT_ACTIVE_KID}
+        active-private-key-pem: ${JWT_ACTIVE_PRIVATE_KEY_PEM}
+        active-public-key-pem: ${JWT_ACTIVE_PUBLIC_KEY_PEM}
+        # JSON array via env, e.g. [{"kid":"2026-01","publicKeyPem":"..."}]; parsed by
+        # Spring Boot's relaxed binding when supplied as an actual list-shaped property
+        # source (Kubernetes Secret projected as YAML/properties, not a raw env string).
+        retired-keys: ${JWT_RETIRED_KEYS:[]}
   mqtt:
     broker-url: ${MQTT_BROKER_URL}
     client-id: ${MQTT_CLIENT_ID}
@@ -32,5 +52,3 @@ iot:
     password: ${MQTT_PASSWORD:}
   redis:
     enabled: true
-    host: ${REDIS_HOST}
-    port: ${REDIS_PORT:6379}

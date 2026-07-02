@@ -18,7 +18,7 @@ iot:
     enabled: false
   security:
     jwt:
-      secret: test-only-secret-for-integration-tests-32b
+      # No keys.* configured — JwtKeyManager generates an ephemeral RSA keypair per test JVM.
       access-token-ttl: 1m
       refresh-token-ttl: 5m
   mqtt:

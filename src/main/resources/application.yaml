@@ -28,7 +28,17 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
 
 springdoc:
   api-docs:
@@ -74,6 +84,10 @@ iot:
     max-clock-skew-future: 5m   # device ts ahead of server time beyond this is flagged as implausible
     max-clock-skew-past: 1h     # device ts behind server time beyond this is flagged as stale-replay
     history-max-window: 7d      # GET /v1/telemetry rejects a from/to span wider than this
+    safety-gap:
+      sensor-types:
+        - smoke
+      max-age: 10m   # a safety sensor silent longer than this raises a TELEMETRY_GAP alert
   health:
     stale-after: 3m   # staleness sweep: mark OFFLINE if last_seen exceeds this (defense-in-depth alongside LWT)
   command:
@@ -82,3 +96,10 @@ iot:
       - exhst_fan
   rules:
     queue-capacity: 1000   # bounded in-process rule-evaluation queue (System Design §5.6)
+  audit:
+    history-max-window: 90d   # GET /v1/audit-logs rejects a from/to span wider than this
+  detection:
+    auth-failure-burst-threshold: 5     # failed logins for one username within a minute
+    rate-limit-spike-threshold: 10      # 429s for one identity within a minute
+    forbidden-spike-threshold: 10       # 403s from one IP within a minute
+    command-timeout-burst-threshold: 3  # command timeouts for one device within a minute

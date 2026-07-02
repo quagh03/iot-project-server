@@ -2,6 +2,7 @@ package com.huylq.iotprojectserver.security;
 
 import com.huylq.iotprojectserver.common.time.Clocks;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.oauth2.jose.jws.SignatureAlgorithm;
 import org.springframework.security.oauth2.jwt.JwsHeader;
 import org.springframework.security.oauth2.jwt.JwtClaimsSet;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
@@ -33,6 +34,7 @@ public class JwtService {
 
   private final JwtEncoder encoder;
   private final JwtConfig config;
+  private final JwtKeyManager keyManager;
 
   public String issueUserAccessToken(String userId, String role) {
     Instant now = Clocks.nowUtc().toInstant();
@@ -67,7 +69,7 @@ public class JwtService {
   }
 
   private String encode(JwtClaimsSet claims) {
-    JwsHeader header = JwsHeader.with(() -> "HS256").build();
+    JwsHeader header = JwsHeader.with(SignatureAlgorithm.RS256).keyId(keyManager.activeKid()).build();
     return encoder.encode(JwtEncoderParameters.from(header, claims)).getTokenValue();
   }
 }

@@ -3,7 +3,6 @@ package com.huylq.iotprojectserver.security;
 import com.huylq.iotprojectserver.common.denylist.DenylistJwtValidator;
 import com.huylq.iotprojectserver.common.error.ErrorType;
 import com.nimbusds.jose.jwk.JWKSet;
-import com.nimbusds.jose.jwk.OctetSequenceKey;
 import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
@@ -23,7 +22,7 @@ import org.springframework.security.crypto.argon2.Argon2PasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
 import org.springframework.security.oauth2.core.OAuth2TokenValidator;
-import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
+import org.springframework.security.oauth2.jose.jws.SignatureAlgorithm;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
@@ -35,22 +34,21 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtGra
 import org.springframework.security.web.SecurityFilterChain;
 import tools.jackson.databind.ObjectMapper;
 
-import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 
 @Configuration
 @EnableMethodSecurity
 @RequiredArgsConstructor
 public class SecurityConfig {
 
-  private final JwtConfig jwtConfig;
   private static final String[] PUBLIC_ENDPOINTS = {
       "/api/v1/auth/login",
       "/api/v1/auth/refresh",
       "/api/v1/auth/logout",
       "/api/v1/oauth2/token",
+      "/api/v1/.well-known/jwks.json",
       "/actuator/health",
+      "/actuator/health/**",
       "/actuator/info",
       "/api/v1/api-docs/**",
       "/api/v1/swagger-ui.html",
@@ -80,9 +78,13 @@ public class SecurityConfig {
   }
 
   @Bean
-  JwtDecoder jwtDecoder(DenylistJwtValidator denylistValidator) {
-    NimbusJwtDecoder decoder = NimbusJwtDecoder.withSecretKey(secretKey())
-        .macAlgorithm(MacAlgorithm.HS256)
+  JwtDecoder jwtDecoder(DenylistJwtValidator denylistValidator, JwtKeyManager keyManager) {
+    // Verification-only key set: active + retired public keys, selected by the token's
+    // own `kid` header — this is what lets a rolled-over key keep verifying tokens it
+    // already issued until they naturally expire (§7 key-rollover requirement).
+    JWKSource<SecurityContext> jwkSource = new ImmutableJWKSet<>(keyManager.publicJwkSet());
+    NimbusJwtDecoder decoder = NimbusJwtDecoder.withJwkSource(jwkSource)
+        .jwsAlgorithm(SignatureAlgorithm.RS256)
         .build();
     OAuth2TokenValidator<Jwt> defaults = JwtValidators.createDefault();
     decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(defaults, denylistValidator));
@@ -90,10 +92,9 @@ public class SecurityConfig {
   }
 
   @Bean
-  JwtEncoder jwtEncoder() throws Exception {
-    OctetSequenceKey jwk = new OctetSequenceKey.Builder(jwtConfig.secret().getBytes(StandardCharsets.UTF_8))
-        .build();
-    JWKSource<SecurityContext> source = new ImmutableJWKSet<>(new JWKSet(jwk));
+  JwtEncoder jwtEncoder(JwtKeyManager keyManager) {
+    // Signing uses only the active key (with private material) — never a retired one.
+    JWKSource<SecurityContext> source = new ImmutableJWKSet<>(new JWKSet(keyManager.activeSigningKey()));
     return new NimbusJwtEncoder(source);
   }
 
@@ -124,6 +125,10 @@ public class SecurityConfig {
         .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
         .authorizeHttpRequests(auth -> auth
             .requestMatchers(PUBLIC_ENDPOINTS).permitAll()
+            // Metrics can reveal internal operational detail (queue depths, partition
+            // sizes, per-endpoint latencies) — ADMIN-only, not just "any authenticated
+            // caller" like the rest of the API defaults to.
+            .requestMatchers("/actuator/prometheus", "/actuator/metrics/**").hasRole("ADMIN")
             .anyRequest().authenticated())
         .oauth2ResourceServer(rs -> rs.jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthConverter)))
         .exceptionHandling(eh -> eh
@@ -140,14 +145,6 @@ public class SecurityConfig {
             .httpStrictTransportSecurity(hsts -> hsts.includeSubDomains(true).maxAgeInSeconds(63072000))
             .contentSecurityPolicy(csp -> csp.policyDirectives("default-src 'self'")));
     return http.build();
-  }
-
-  private SecretKeySpec secretKey() {
-    byte[] keyBytes = jwtConfig.secret().getBytes(StandardCharsets.UTF_8);
-    if (keyBytes.length < 32) {
-      throw new IllegalStateException("iot.security.jwt.secret must be at least 32 bytes (256 bits) for HS256");
-    }
-    return new SecretKeySpec(keyBytes, "HmacSHA256");
   }
 
   private static void writeProblem(HttpServletResponse res, ObjectMapper mapper, int status,

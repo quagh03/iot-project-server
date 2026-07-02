@@ -1,7 +1,8 @@
 package com.huylq.iotprojectserver.common.partition;
 
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PostConstruct;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -22,11 +23,17 @@ import java.util.regex.Pattern;
  * {@code V1__init_schema.sql}.
  *
  * <p>Partition creation runs at startup and daily; drop-don't-delete retention is wired
- * but disabled by default ({@code iot.partitioning.retention-months=0}).
+ * but disabled by default ({@code iot.partitioning.retention-months=0}). A missing
+ * current-month partition (Phase 10: "alerting if a partition is missing") is surfaced as
+ * a {@code iot.partition.missing} gauge — a Prometheus/Alertmanager rule on that metric is
+ * the intended paging path, not an in-app {@code Alert} row: {@code common} deliberately
+ * has no dependency on the {@code alert} domain module (module-boundary invariant —
+ * domain modules depend on {@code common}, never the reverse), and a missing partition is
+ * an infrastructure failure, not a business/safety event like the {@code alert} module's
+ * `SMOKE`/`HEAT` alerts.
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class PartitionManager {
 
   private static final DateTimeFormatter SUFFIX = DateTimeFormatter.ofPattern("yyyy_MM");
@@ -35,14 +42,31 @@ public class PartitionManager {
   private final JdbcTemplate jdbc;
   private final PartitionConfig config;
 
+  public PartitionManager(JdbcTemplate jdbc, PartitionConfig config, MeterRegistry meterRegistry) {
+    this.jdbc = jdbc;
+    this.config = config;
+    for (String table : config.tables()) {
+      Gauge.builder("iot.partition.size.bytes", () -> currentPartitionSizeBytes(table))
+          .tag("table", table)
+          .description("Byte size of the current month's partition (0 if the partition is missing)")
+          .register(meterRegistry);
+      Gauge.builder("iot.partition.missing", () -> currentPartitionMissing(table) ? 1 : 0)
+          .tag("table", table)
+          .description("1 if the current month's partition is missing for this table, else 0")
+          .register(meterRegistry);
+    }
+  }
+
   @PostConstruct
   public void onStartup() {
     ensureUpcomingPartitions();
+    verifyCurrentPartitionsExist();
   }
 
   @Scheduled(cron = "0 0 3 * * *", zone = "UTC")
   public void daily() {
     ensureUpcomingPartitions();
+    verifyCurrentPartitionsExist();
     if (config.retentionMonths() > 0) dropExpiredPartitions();
   }
 
@@ -70,6 +94,22 @@ public class PartitionManager {
         """).formatted(childName, table, fromBound, toBound);
     jdbc.execute(ddl);
     log.debug("Ensured partition {} on {}", childName, table);
+  }
+
+  /**
+   * Defensive check independent of {@link #ensurePartition} — catches a partition that
+   * was expected but is actually absent (manually dropped, a prior DDL failure that was
+   * swallowed, etc.), since every write to that month would otherwise fail the moment it
+   * arrives rather than being caught proactively. Logs loudly; the {@code
+   * iot.partition.missing} gauge is the actual paging signal.
+   */
+  void verifyCurrentPartitionsExist() {
+    for (String table : config.tables()) {
+      if (currentPartitionMissing(table)) {
+        log.error("Expected partition {}_{} is missing for table {} — writes to the current month will fail",
+            table, YearMonth.now().format(SUFFIX), table);
+      }
+    }
   }
 
   /**
@@ -105,5 +145,22 @@ public class PartitionManager {
         JOIN pg_class parent ON inh.inhparent = parent.oid
         WHERE parent.relname = ?
         """, String.class, parentTable);
+  }
+
+  /**
+   * {@code pg_total_relation_size} is an O(1) catalog/metadata lookup, not a scan — safe
+   * to call on every metrics scrape even for a huge partition. {@code to_regclass}
+   * returns {@code NULL} (not an error) for a missing relation.
+   */
+  private long currentPartitionSizeBytes(String table) {
+    String partitionName = table + "_" + YearMonth.now().format(SUFFIX);
+    Long size = jdbc.queryForObject(
+        "SELECT pg_total_relation_size(to_regclass(?))", Long.class, partitionName);
+    return size == null ? 0L : size;
+  }
+
+  private boolean currentPartitionMissing(String table) {
+    String expected = table + "_" + YearMonth.now().format(SUFFIX);
+    return !listPartitions(table).contains(expected);
   }
 }

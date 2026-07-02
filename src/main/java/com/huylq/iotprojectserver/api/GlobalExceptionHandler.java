@@ -2,9 +2,11 @@ package com.huylq.iotprojectserver.api;
 
 import com.huylq.iotprojectserver.common.error.ApiException;
 import com.huylq.iotprojectserver.common.error.ErrorType;
+import com.huylq.iotprojectserver.security.detection.SecurityDetectionService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
@@ -37,7 +39,10 @@ import java.util.Map;
  */
 @Slf4j
 @RestControllerAdvice
+@RequiredArgsConstructor
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
+
+  private final SecurityDetectionService securityDetection;
 
   // ---- Domain exceptions ------------------------------------------------------------------
 
@@ -50,6 +55,7 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
   @ExceptionHandler(AccessDeniedException.class)
   public ResponseEntity<ProblemDetail> handleAccessDenied(AccessDeniedException ex, HttpServletRequest req) {
+    securityDetection.recordAccessDenied(AuthController.clientIp(req), req.getRequestURI());
     return entity(problem(HttpStatus.FORBIDDEN, ErrorType.FORBIDDEN,
         "Insufficient role or scope for this resource", req));
   }

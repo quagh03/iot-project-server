@@ -9,6 +9,7 @@ import com.huylq.iotprojectserver.common.error.ErrorType;
 import com.huylq.iotprojectserver.common.time.Clocks;
 import com.huylq.iotprojectserver.security.JwtConfig;
 import com.huylq.iotprojectserver.security.JwtService;
+import com.huylq.iotprojectserver.security.detection.SecurityDetectionService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -40,6 +41,7 @@ class AuthServiceImpl implements AuthService {
   private final JwtConfig jwtConfig;
   private final AuditService audit;
   private final TokenDenylist denylist;
+  private final SecurityDetectionService securityDetection;
 
   @Override
   @Transactional
@@ -53,6 +55,7 @@ class AuthServiceImpl implements AuthService {
       log.warn("Login failed for username='{}'", username);
       audit.append(username, AuditLog.ActorType.USER,
           AuditEvent.USER_LOGIN_FAILED, null, null, ip);
+      securityDetection.recordAuthFailure(username, ip);
       throw new ApiException(ErrorType.UNAUTHENTICATED, HttpStatus.UNAUTHORIZED, "Invalid credentials");
     }
     User user = maybeUser.get();
@@ -89,6 +92,7 @@ class AuthServiceImpl implements AuthService {
       cascadeRevoke(row);
       audit.user(row.getUser().getId().toString(), AuditEvent.USER_TOKEN_REUSE_DETECTED,
           null, Map.of("tokenId", row.getId().toString()), ip);
+      securityDetection.recordRefreshReuse(row.getUser().getId().toString());
       throw ApiException.tokenRevoked("Refresh token already used");
     }
     if (row.getExpiresAt().isBefore(now)) {

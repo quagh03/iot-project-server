@@ -4,6 +4,8 @@ import com.huylq.iotprojectserver.audit.AuditEvent;
 import com.huylq.iotprojectserver.audit.AuditService;
 import com.huylq.iotprojectserver.common.time.Clocks;
 import com.huylq.iotprojectserver.registry.Device;
+import com.huylq.iotprojectserver.security.detection.SecurityDetectionService;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,12 +32,15 @@ class CommandTimeoutSweeperTest {
 
   @Mock private CommandRepository commandRepo;
   @Mock private AuditService audit;
+  @Mock private SecurityDetectionService securityDetection;
 
   private CommandTimeoutSweeper sweeper;
 
   @BeforeEach
   void setUp() {
-    sweeper = new CommandTimeoutSweeper(commandRepo, audit, new CommandProperties(Duration.ofSeconds(30), List.of("exhst_fan")));
+    sweeper = new CommandTimeoutSweeper(commandRepo, audit,
+        new CommandProperties(Duration.ofSeconds(30), List.of("exhst_fan")), new SimpleMeterRegistry(),
+        securityDetection);
     Clocks.setClock(Clock.fixed(NOW.toInstant(), ZoneOffset.UTC));
   }
 

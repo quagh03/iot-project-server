@@ -13,6 +13,10 @@ spring:
   devtools:
     restart:
       enabled: true
+  data:
+    redis:
+      host: localhost
+      port: 6379
 
 logging:
   level:
@@ -20,14 +24,11 @@ logging:
     org.hibernate.SQL: DEBUG
 
 iot:
-  security:
-    jwt:
-      # Dev-only HS256 secret — minimum 32 bytes. Replaced via env in prod.
-      secret: ${JWT_SECRET:dev-only-secret-please-change-me-now}
+  # No iot.security.jwt.keys.* configured — JwtKeyManager generates an ephemeral RSA
+  # keypair for local dev. Fine for local; production must set real PEM material (or,
+  # better, wire a real KMS) — see the ops runbook.
   mqtt:
     broker-url: tcp://localhost:1883
     client-id: iot-server-local
   redis:
     enabled: false
-    host: localhost
-    port: 6379

@@ -11,6 +11,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record MqttProperties(
     String brokerUrl,
     String clientId,
+    String username,
+    String password,
     int connectTimeoutSeconds,
     int keepAliveIntervalSeconds,
     boolean automaticReconnect,

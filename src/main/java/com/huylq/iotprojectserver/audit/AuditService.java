@@ -1,9 +1,11 @@
 package com.huylq.iotprojectserver.audit;
 
+import java.time.OffsetDateTime;
 import java.util.Map;
 
 /**
- * Append-only audit writer. Phase 1 ships the writer; the query API arrives in Phase 9.
+ * Append-only audit writer + query (Phase 1 ships the writer; Phase 9 adds the query
+ * half — same module, same published interface).
  *
  * <p>All security-relevant events must call one of these methods: login, device
  * register/delete, credential rotation, rule change, command execution, role change.
@@ -33,4 +35,13 @@ public interface AuditService {
   default void system(AuditEvent event, String target, Map<String, Object> detail) {
     append("system", AuditLog.ActorType.SYSTEM, event, target, detail, null);
   }
+
+  /**
+   * Read-only query over the partitioned, append-only {@code audit_logs} table (API §10)
+   * — {@code from}/{@code to} are the caller's responsibility to bound; this module does
+   * not enforce the mandatory-window rule itself (that's the {@code api} layer's job, same
+   * split as {@code telemetry}'s history query).
+   */
+  AuditPage query(String actor, AuditLog.ActorType actorType, String event, String target,
+                 OffsetDateTime from, OffsetDateTime to, String cursor, int pageSize);
 }

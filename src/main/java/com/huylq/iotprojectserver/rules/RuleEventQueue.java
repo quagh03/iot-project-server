@@ -1,6 +1,8 @@
 package com.huylq.iotprojectserver.rules;
 
 import com.huylq.iotprojectserver.telemetry.ReadingEvent;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -23,9 +25,20 @@ class RuleEventQueue {
   private final BlockingQueue<ReadingEvent> queue;
   private final int capacity;
 
-  RuleEventQueue(RuleEngineProperties props) {
+  RuleEventQueue(RuleEngineProperties props, MeterRegistry meterRegistry) {
     this.capacity = props.queueCapacity();
     this.queue = new LinkedBlockingQueue<>(capacity);
+    // A gauge queries queue.size() live at scrape time — a persistently high value here
+    // is the "rule evaluation is falling behind ingestion" signal (System Design §5.6:
+    // the whole point of the queue is that a slow rule can't back up telemetry, but if
+    // the queue is chronically near-full, readings are silently losing their chance at a
+    // firing — see the ops runbook's queue-depth alert threshold).
+    Gauge.builder("iot.rules.queue.depth", queue, java.util.Collection::size)
+        .description("Current depth of the in-process rule-evaluation queue")
+        .register(meterRegistry);
+    Gauge.builder("iot.rules.queue.capacity", () -> capacity)
+        .description("Configured capacity of the in-process rule-evaluation queue")
+        .register(meterRegistry);
   }
 
   void offer(ReadingEvent event) {

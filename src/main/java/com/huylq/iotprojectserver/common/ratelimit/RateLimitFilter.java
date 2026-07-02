@@ -2,6 +2,7 @@ package com.huylq.iotprojectserver.common.ratelimit;
 
 import com.huylq.iotprojectserver.common.error.ErrorType;
 import com.huylq.iotprojectserver.security.JwtService;
+import com.huylq.iotprojectserver.security.detection.SecurityDetectionService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -31,6 +32,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
   private final RateLimiter rateLimiter;
   private final RateLimitConfig config;
   private final ObjectMapper objectMapper;
+  private final SecurityDetectionService securityDetection;
 
   @Override
   protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res, FilterChain chain)
@@ -53,6 +55,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
     if (!d.allowed()) {
       res.setHeader("Retry-After", String.valueOf(d.resetSeconds()));
+      securityDetection.recordRateLimitDenial(category.name(), keyFor(req, category));
       writeProblem(res, req.getRequestURI(), d.resetSeconds());
       return;
     }

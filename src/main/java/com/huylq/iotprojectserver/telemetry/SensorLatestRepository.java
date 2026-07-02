@@ -14,6 +14,8 @@ public interface SensorLatestRepository extends JpaRepository<SensorLatest, Stri
 
   List<SensorLatest> findByZoneAndSensorType(String zone, String sensorType);
 
+  List<SensorLatest> findBySensorType(String sensorType);
+
   /**
    * Upsert the latest reading for a sensor. Guards against out-of-order samples:
    * an older {@code ts} than the row's current {@code ts} is silently dropped.

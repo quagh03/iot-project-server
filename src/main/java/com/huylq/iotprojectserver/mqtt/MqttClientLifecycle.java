@@ -101,6 +101,14 @@ public class MqttClientLifecycle implements SmartLifecycle {
       opts.setMaxReconnectDelay(props.maxReconnectDelayMs());
       opts.setConnectionTimeout(props.connectTimeoutSeconds());
       opts.setKeepAliveInterval(props.keepAliveIntervalSeconds());
+      // Prod (MQTTS + broker auth): iot.mqtt.username/password were previously accepted
+      // by application-prod.yaml but never applied here — the broker connection silently
+      // ran unauthenticated. Only set when configured so local/test (allow_anonymous)
+      // keeps working unchanged.
+      if (props.username() != null && !props.username().isBlank()) {
+        opts.setUserName(props.username());
+        opts.setPassword(props.password() == null ? new char[0] : props.password().toCharArray());
+      }
       client.connect(opts);
     } catch (MqttException e) {
       log.error("Initial MQTT connect to {} failed (will rely on automatic reconnect): {}",

@@ -6,6 +6,7 @@ import com.huylq.iotprojectserver.health.HealthService;
 import com.huylq.iotprojectserver.registry.Device;
 import com.huylq.iotprojectserver.registry.RegistryService;
 import com.huylq.iotprojectserver.registry.Sensor;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -48,7 +49,8 @@ class TelemetryServiceImplTest {
   void setUp() {
     TelemetryIngestProperties props = new TelemetryIngestProperties(
         Duration.ofMinutes(5), Duration.ofHours(1), Duration.ofDays(7));
-    service = new TelemetryServiceImpl(telemetryRepo, sensorLatestRepo, registry, ruleEvents, props, healthService);
+    service = new TelemetryServiceImpl(telemetryRepo, sensorLatestRepo, registry, ruleEvents, props, healthService,
+        new SimpleMeterRegistry());
     Clocks.setClock(Clock.fixed(NOW.toInstant(), ZoneOffset.UTC));
   }
 

@@ -13,6 +13,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
@@ -29,8 +30,16 @@ class AlertServiceImpl implements AlertService {
   private final RegistryService registry;
   private final AuditService audit;
 
+  /**
+   * {@code REQUIRES_NEW} — a detection-signal alert (Phase 10) is very often raised from
+   * inside a caller that's about to throw and roll back (e.g. {@code AuthServiceImpl
+   * .login}'s failure path, via {@code SecurityDetectionService}). The alert must survive
+   * that rollback the same way {@code AuditServiceImpl.append} already does, for the same
+   * reason: an alert about a failed/rejected operation is worthless if it vanishes
+   * alongside the very rollback it's reporting on.
+   */
   @Override
-  @Transactional
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
   public Alert raise(String type, Alert.Severity severity, String zone, String sourceDeviceId, String message) {
     Alert alert = Alert.builder()
         .type(type)

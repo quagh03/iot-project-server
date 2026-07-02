@@ -5,13 +5,12 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import java.time.Duration;
 
 /**
- * JWT issuer settings. The {@code secret} must be at least 32 bytes for HS256;
- * production deployments must provide it via environment variable, never source.
+ * JWT issuer settings. Signing/verification key material lives in {@link
+ * JwtKeyProperties} (asymmetric, KMS-backed in production), not here.
  */
 @ConfigurationProperties("iot.security.jwt")
 public record JwtConfig(
     String issuer,
-    String secret,
     Duration accessTokenTtl,
     Duration refreshTokenTtl,
     Duration deviceTokenTtl) {

@@ -5,6 +5,7 @@ import com.huylq.iotprojectserver.common.time.Clocks;
 import com.huylq.iotprojectserver.health.HealthService;
 import com.huylq.iotprojectserver.registry.RegistryService;
 import com.huylq.iotprojectserver.registry.Sensor;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
@@ -28,6 +29,7 @@ class TelemetryServiceImpl implements TelemetryService {
   private final RuleEventPublisher ruleEvents;
   private final TelemetryIngestProperties props;
   private final HealthService healthService;
+  private final MeterRegistry meterRegistry;
 
   @Override
   @Transactional
@@ -58,6 +60,7 @@ class TelemetryServiceImpl implements TelemetryService {
           .build());
     }
     telemetryRepo.saveAll(rows);
+    meterRegistry.counter("iot.telemetry.ingest.readings").increment(rows.size());
     // A telemetry reading is itself liveness evidence (System Design §6/§8: "heartbeat/
     // telemetry flip it ONLINE") — leaves resource-metric columns to the heartbeat path.
     healthService.touchOnline(command.gatewayId(), command.receivedAt());
