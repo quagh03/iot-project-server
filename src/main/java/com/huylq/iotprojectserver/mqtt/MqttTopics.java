@@ -10,6 +10,12 @@ public final class MqttTopics {
   /** {@code iot/telemetry/{zone}/{gateway_id}} — per-gateway suffix for broker-ACL granularity. */
   public static final String TELEMETRY_FILTER = "iot/telemetry/+/+";
 
+  /** {@code iot/heartbeat/{device_id}} — device-published health upsert. */
+  public static final String HEARTBEAT_FILTER = "iot/heartbeat/+";
+
+  /** {@code iot/status/{device_id}} — broker-published Last Will & Testament (presence). */
+  public static final String STATUS_FILTER = "iot/status/+";
+
   private MqttTopics() {
   }
 }

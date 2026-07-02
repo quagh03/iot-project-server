@@ -2,6 +2,7 @@ package com.huylq.iotprojectserver.telemetry;
 
 import com.huylq.iotprojectserver.common.error.ApiException;
 import com.huylq.iotprojectserver.common.time.Clocks;
+import com.huylq.iotprojectserver.health.HealthService;
 import com.huylq.iotprojectserver.registry.RegistryService;
 import com.huylq.iotprojectserver.registry.Sensor;
 import lombok.RequiredArgsConstructor;
@@ -26,6 +27,7 @@ class TelemetryServiceImpl implements TelemetryService {
   private final RegistryService registry;
   private final RuleEventPublisher ruleEvents;
   private final TelemetryIngestProperties props;
+  private final HealthService healthService;
 
   @Override
   @Transactional
@@ -56,6 +58,9 @@ class TelemetryServiceImpl implements TelemetryService {
           .build());
     }
     telemetryRepo.saveAll(rows);
+    // A telemetry reading is itself liveness evidence (System Design §6/§8: "heartbeat/
+    // telemetry flip it ONLINE") — leaves resource-metric columns to the heartbeat path.
+    healthService.touchOnline(command.gatewayId(), command.receivedAt());
 
     for (ReadingCommand r : command.readings()) {
       sensorLatestRepo.upsert(r.sensorId(), command.zone(), r.sensorType(), r.valueNum(), r.valueBool(),

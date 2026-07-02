@@ -15,4 +15,14 @@ public class MqttConfig {
   MqttTopicSubscription telemetryTopicSubscription(TelemetryMqttListener listener) {
     return new MqttTopicSubscription(MqttTopics.TELEMETRY_FILTER, 1, listener);
   }
+
+  @Bean
+  MqttTopicSubscription heartbeatTopicSubscription(HeartbeatMqttListener listener) {
+    return new MqttTopicSubscription(MqttTopics.HEARTBEAT_FILTER, 1, listener);
+  }
+
+  @Bean
+  MqttTopicSubscription statusTopicSubscription(PresenceMqttListener listener) {
+    return new MqttTopicSubscription(MqttTopics.STATUS_FILTER, 1, listener);
+  }
 }

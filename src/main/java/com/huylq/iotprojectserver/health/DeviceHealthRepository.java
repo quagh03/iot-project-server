@@ -52,4 +52,45 @@ public interface DeviceHealthRepository extends JpaRepository<DeviceHealth, Stri
              @Param("memoryUsagePct") Short memoryUsagePct,
              @Param("cpuUsagePct") Short cpuUsagePct,
              @Param("wifiRssi") Short wifiRssi);
+
+  /**
+   * Liveness-only touch (a telemetry reading counts as presence) — leaves any
+   * previously reported resource metrics untouched, unlike {@link #upsert}.
+   */
+  @Modifying
+  @Query(value = """
+      INSERT INTO device_health (device_id, connection_status, last_seen, updated_at)
+      VALUES (:deviceId, 'ONLINE', :lastSeen, now())
+      ON CONFLICT (device_id) DO UPDATE SET
+          connection_status = 'ONLINE',
+          last_seen         = EXCLUDED.last_seen,
+          updated_at        = now()
+      """, nativeQuery = true)
+  int touchOnline(@Param("deviceId") String deviceId, @Param("lastSeen") OffsetDateTime lastSeen);
+
+  /**
+   * Consumes the broker-published LWT (System Design §6/§8) — flips presence OFFLINE
+   * without disturbing the last known resource metrics.
+   */
+  @Modifying
+  @Query(value = """
+      INSERT INTO device_health (device_id, connection_status, updated_at)
+      VALUES (:deviceId, 'OFFLINE', now())
+      ON CONFLICT (device_id) DO UPDATE SET
+          connection_status = 'OFFLINE',
+          updated_at        = now()
+      """, nativeQuery = true)
+  int markOffline(@Param("deviceId") String deviceId);
+
+  /**
+   * Staleness sweep (defense-in-depth alongside LWT) — flips any device still marked
+   * {@code ONLINE} whose {@code last_seen} has aged past the cutoff.
+   */
+  @Modifying
+  @Query(value = """
+      UPDATE device_health
+      SET connection_status = 'OFFLINE', updated_at = now()
+      WHERE connection_status = 'ONLINE' AND last_seen < :cutoff
+      """, nativeQuery = true)
+  int markStaleOffline(@Param("cutoff") OffsetDateTime cutoff);
 }

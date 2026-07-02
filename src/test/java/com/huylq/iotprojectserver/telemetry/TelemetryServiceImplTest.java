@@ -2,6 +2,7 @@ package com.huylq.iotprojectserver.telemetry;
 
 import com.huylq.iotprojectserver.common.error.ApiException;
 import com.huylq.iotprojectserver.common.time.Clocks;
+import com.huylq.iotprojectserver.health.HealthService;
 import com.huylq.iotprojectserver.registry.Device;
 import com.huylq.iotprojectserver.registry.RegistryService;
 import com.huylq.iotprojectserver.registry.Sensor;
@@ -39,6 +40,7 @@ class TelemetryServiceImplTest {
   @Mock private SensorLatestRepository sensorLatestRepo;
   @Mock private RegistryService registry;
   @Mock private RuleEventPublisher ruleEvents;
+  @Mock private HealthService healthService;
 
   private TelemetryServiceImpl service;
 
@@ -46,7 +48,7 @@ class TelemetryServiceImplTest {
   void setUp() {
     TelemetryIngestProperties props = new TelemetryIngestProperties(
         Duration.ofMinutes(5), Duration.ofHours(1), Duration.ofDays(7));
-    service = new TelemetryServiceImpl(telemetryRepo, sensorLatestRepo, registry, ruleEvents, props);
+    service = new TelemetryServiceImpl(telemetryRepo, sensorLatestRepo, registry, ruleEvents, props, healthService);
     Clocks.setClock(Clock.fixed(NOW.toInstant(), ZoneOffset.UTC));
   }
 
@@ -150,6 +152,7 @@ class TelemetryServiceImplTest {
     verify(telemetryRepo).saveAll(anyList());
     verify(sensorLatestRepo).upsert("s_temp_1", "office_1", "temp", 22.4, null, "C", NOW);
     verify(ruleEvents).publish(any());
+    verify(healthService).touchOnline("gw_1", NOW);
   }
 
   @Test
@@ -161,6 +164,7 @@ class TelemetryServiceImplTest {
     service.ingest(cmd);
 
     verify(telemetryRepo).saveAll(anyList());
+    verify(healthService).touchOnline("gw_1", NOW);
   }
 
   @Test

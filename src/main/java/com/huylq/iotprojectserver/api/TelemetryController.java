@@ -1,6 +1,7 @@
 package com.huylq.iotprojectserver.api;
 
 import com.huylq.iotprojectserver.api.dto.ListResponse;
+import com.huylq.iotprojectserver.api.dto.health.HeartbeatRequest;
 import com.huylq.iotprojectserver.api.dto.telemetry.CurrentStateDto;
 import com.huylq.iotprojectserver.api.dto.telemetry.TelemetryIngestRequest;
 import com.huylq.iotprojectserver.api.dto.telemetry.TelemetryReadingDto;
@@ -11,6 +12,7 @@ import com.huylq.iotprojectserver.common.pagination.PagedResponse;
 import com.huylq.iotprojectserver.common.pagination.PaginationConfig;
 import com.huylq.iotprojectserver.common.time.Clocks;
 import com.huylq.iotprojectserver.health.HealthService;
+import com.huylq.iotprojectserver.health.HeartbeatCommand;
 import com.huylq.iotprojectserver.telemetry.ReadingCommand;
 import com.huylq.iotprojectserver.telemetry.TelemetryIngestCommand;
 import com.huylq.iotprojectserver.telemetry.TelemetryIngestProperties;
@@ -118,5 +120,15 @@ public class TelemetryController {
     List<ZoneConnectivityDto> items = healthService.connectivity(zone).stream()
         .map(ZoneConnectivityDto::from).toList();
     return ResponseEntity.ok(ListResponse.of(items));
+  }
+
+  @PostMapping("/heartbeat")
+  @PreAuthorize("hasAuthority('SCOPE_heartbeat:publish')")
+  public ResponseEntity<Void> heartbeat(@Valid @RequestBody HeartbeatRequest req,
+                                        @AuthenticationPrincipal Jwt device) {
+    log.debug("POST /heartbeat deviceId='{}' device={}", req.deviceId(), device.getSubject());
+    healthService.upsertHeartbeat(new HeartbeatCommand(req.deviceId(), device.getSubject(),
+        req.memoryUsagePct(), req.cpuUsagePct(), req.wifiRssi(), Clocks.nowUtc()));
+    return ResponseEntity.accepted().build();
   }
 }

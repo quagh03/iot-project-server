@@ -5,11 +5,13 @@ import com.huylq.iotprojectserver.api.dto.device.DeviceDto;
 import com.huylq.iotprojectserver.api.dto.device.RegisterDeviceRequest;
 import com.huylq.iotprojectserver.api.dto.device.SensorDto;
 import com.huylq.iotprojectserver.api.dto.device.UpdateDeviceRequest;
+import com.huylq.iotprojectserver.api.dto.health.DeviceHealthDto;
 import com.huylq.iotprojectserver.common.error.ApiException;
 import com.huylq.iotprojectserver.common.idempotency.IdempotencyHelper;
 import com.huylq.iotprojectserver.common.pagination.OffsetPage;
 import com.huylq.iotprojectserver.common.pagination.PagedResponse;
 import com.huylq.iotprojectserver.common.pagination.PaginationConfig;
+import com.huylq.iotprojectserver.health.HealthService;
 import com.huylq.iotprojectserver.registry.Device;
 import com.huylq.iotprojectserver.registry.RegistryService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -49,6 +51,7 @@ import java.util.UUID;
 public class DeviceController {
 
   private final RegistryService registry;
+  private final HealthService healthService;
   private final PaginationConfig pagination;
   private final IdempotencyHelper idempotency;
   private final ObjectMapper json;
@@ -104,6 +107,13 @@ public class DeviceController {
     Device device = registry.update(deviceId, req.zone(), req.deviceType(), req.firmwareVersion(),
         caller.getSubject(), AuthController.clientIp(http));
     return ResponseEntity.ok(DeviceDto.from(device));
+  }
+
+  @GetMapping("/{deviceId}/health")
+  @PreAuthorize("hasRole('VIEWER')")
+  public ResponseEntity<DeviceHealthDto> health(@PathVariable String deviceId) {
+    log.debug("GET /devices/{}/health", deviceId);
+    return ResponseEntity.ok(DeviceHealthDto.from(healthService.getHealth(deviceId)));
   }
 
   @GetMapping("/{deviceId}/sensors")
