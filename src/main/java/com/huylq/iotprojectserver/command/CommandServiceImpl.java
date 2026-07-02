@@ -1,6 +1,7 @@
 package com.huylq.iotprojectserver.command;
 
 import com.huylq.iotprojectserver.audit.AuditEvent;
+import com.huylq.iotprojectserver.audit.AuditLog;
 import com.huylq.iotprojectserver.audit.AuditService;
 import com.huylq.iotprojectserver.command.CommandParameterValidator.ValidatedCommand;
 import com.huylq.iotprojectserver.common.error.ApiException;
@@ -45,8 +46,11 @@ class CommandServiceImpl implements CommandService {
     Device target = resolveActuator(cmd.targetId());
     ValidatedCommand validated = CommandParameterValidator.validate(target.getDeviceType(), cmd.action(), cmd.parameters());
 
-    authorizeRoleAndActuatorClass(cmd.callerRole(), target, validated);
-    validateOverrideRequest(cmd.callerRole(), cmd.override(), cmd.overrideReason());
+    boolean manual = cmd.actorType() == AuditLog.ActorType.USER;
+    if (manual) {
+      authorizeRoleAndActuatorClass(cmd.callerRole(), target, validated);
+      validateOverrideRequest(cmd.callerRole(), cmd.override(), cmd.overrideReason());
+    }
 
     String commandId = "CMD_" + UUID.randomUUID();
     boolean overriding = checkSafetyInterlock(cmd, target, validated, commandId);
@@ -78,13 +82,18 @@ class CommandServiceImpl implements CommandService {
           commandId, target.getDeviceId(), e.getMessage());
     }
 
-    audit.user(cmd.callerId(), AuditEvent.COMMAND_ISSUE, target.getDeviceId(),
-        Map.of("commandId", commandId, "action", cmd.action()), cmd.ip());
-    audit.user(cmd.callerId(), AuditEvent.MANUAL_COMMAND, target.getDeviceId(),
-        Map.of("commandId", commandId, "action", cmd.action()), cmd.ip());
-    if (overriding) {
-      audit.user(cmd.callerId(), AuditEvent.SAFETY_OVERRIDE, target.getDeviceId(),
-          Map.of("commandId", commandId, "action", cmd.action(), "overrideReason", cmd.overrideReason()), cmd.ip());
+    if (manual) {
+      audit.user(cmd.callerId(), AuditEvent.COMMAND_ISSUE, target.getDeviceId(),
+          Map.of("commandId", commandId, "action", cmd.action()), cmd.ip());
+      audit.user(cmd.callerId(), AuditEvent.MANUAL_COMMAND, target.getDeviceId(),
+          Map.of("commandId", commandId, "action", cmd.action()), cmd.ip());
+      if (overriding) {
+        audit.user(cmd.callerId(), AuditEvent.SAFETY_OVERRIDE, target.getDeviceId(),
+            Map.of("commandId", commandId, "action", cmd.action(), "overrideReason", cmd.overrideReason()), cmd.ip());
+      }
+    } else {
+      audit.system(AuditEvent.COMMAND_ISSUE, target.getDeviceId(),
+          Map.of("commandId", commandId, "action", cmd.action(), "issuedBy", cmd.callerId()));
     }
     log.info("Command {} issued: target={} action={} caller={} override={}",
         commandId, target.getDeviceId(), cmd.action(), cmd.callerId(), overriding);

@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.mqtt;
 
+import com.huylq.iotprojectserver.audit.AuditLog;
 import com.huylq.iotprojectserver.command.ActuatorStateRepository;
 import com.huylq.iotprojectserver.command.Command;
 import com.huylq.iotprojectserver.command.CommandRepository;
@@ -91,7 +92,8 @@ class CommandMqttIT extends AbstractMqttIT {
   @Test
   void issued_command_is_published_and_terminal_ack_settles_lifecycle_and_actuator_state() throws Exception {
     Command command = commandService.issue(new CommandService.IssueCommandCmd(
-        "light_1", "SET", Map.of("status", "ON"), false, null, "user-1", Role.OPERATOR, "127.0.0.1"));
+        "light_1", "SET", Map.of("status", "ON"), false, null, "user-1", Role.OPERATOR,
+        AuditLog.ActorType.USER, "127.0.0.1"));
 
     MqttMessage delivered = received.poll(10, java.util.concurrent.TimeUnit.SECONDS);
     assertThat(delivered).isNotNull();

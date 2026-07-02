@@ -42,6 +42,12 @@ public enum AuditEvent {
   MANUAL_COMMAND("command.manual"),
   SAFETY_OVERRIDE("command.safety-override"),
 
+  // ---- rules (Phase 7) ----------------------------------------------------------------
+  RULE_CREATE("rule.create"),
+  RULE_UPDATE("rule.update"),
+  RULE_PATCH("rule.patch"),
+  RULE_DELETE("rule.delete"),
+
   // ---- system (PartitionManager, retention sweeper, scheduled jobs) ------------------
   PARTITION_CREATED("partition.created"),
   PARTITION_DROPPED("partition.dropped");

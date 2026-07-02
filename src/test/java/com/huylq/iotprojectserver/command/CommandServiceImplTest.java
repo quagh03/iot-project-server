@@ -1,6 +1,7 @@
 package com.huylq.iotprojectserver.command;
 
 import com.huylq.iotprojectserver.audit.AuditEvent;
+import com.huylq.iotprojectserver.audit.AuditLog;
 import com.huylq.iotprojectserver.audit.AuditService;
 import com.huylq.iotprojectserver.common.error.ApiException;
 import com.huylq.iotprojectserver.common.time.Clocks;
@@ -69,7 +70,13 @@ class CommandServiceImplTest {
   private static CommandService.IssueCommandCmd cmd(String targetId, String action, Map<String, Object> params,
                                                      Role role, boolean override, String reason) {
     return new CommandService.IssueCommandCmd(targetId, action, params, override, reason,
-        "user-1", role, "127.0.0.1");
+        "user-1", role, AuditLog.ActorType.USER, "127.0.0.1");
+  }
+
+  private static CommandService.IssueCommandCmd systemCmd(String targetId, String action, Map<String, Object> params,
+                                                           String ruleId) {
+    return new CommandService.IssueCommandCmd(targetId, action, params, false, null,
+        ruleId, null, AuditLog.ActorType.SYSTEM, null);
   }
 
   // ---- target resolution ----------------------------------------------------------------
@@ -224,6 +231,31 @@ class CommandServiceImplTest {
     verify(audit).user(eq("user-1"), eq(AuditEvent.COMMAND_ISSUE), eq("light_1"), any(), eq("127.0.0.1"));
     verify(audit).user(eq("user-1"), eq(AuditEvent.MANUAL_COMMAND), eq("light_1"), any(), eq("127.0.0.1"));
     verify(audit, never()).user(anyString(), eq(AuditEvent.SAFETY_OVERRIDE), anyString(), any(), anyString());
+  }
+
+  // ---- system (rule-issued) commands -----------------------------------------------------
+
+  @Test
+  void system_issue_skips_role_authorization_and_override_checks() {
+    // A rule commanding a safety actuator OFF would be forbidden for every human role
+    // below ADMIN — a SYSTEM actor must not be role-gated at all.
+    when(registry.find("exhst_1")).thenReturn(Optional.of(actuator("exhst_1", "exhst_fan", Device.Status.ACTIVE)));
+
+    Command result = service.issue(systemCmd("exhst_1", "SET", Map.of("status", "OFF"), "rule-123"));
+
+    assertThat(result.getStatus()).isEqualTo(Command.Status.PENDING);
+    assertThat(result.getIssuedBy()).isEqualTo("rule-123");
+  }
+
+  @Test
+  void system_issue_audits_command_issue_only_never_manual_command() {
+    when(registry.find("light_1")).thenReturn(Optional.of(actuator("light_1", "light", Device.Status.ACTIVE)));
+
+    service.issue(systemCmd("light_1", "SET", Map.of("status", "ON"), "rule-123"));
+
+    verify(audit).system(eq(AuditEvent.COMMAND_ISSUE), eq("light_1"), any());
+    verify(audit, never()).user(anyString(), eq(AuditEvent.MANUAL_COMMAND), anyString(), any(), anyString());
+    verify(audit, never()).user(anyString(), any(), anyString(), any(), anyString());
   }
 
   // ---- ack correlation --------------------------------------------------------------------

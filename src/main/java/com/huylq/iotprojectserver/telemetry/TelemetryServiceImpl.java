@@ -105,6 +105,12 @@ class TelemetryServiceImpl implements TelemetryService {
         .orElseThrow(() -> ApiException.notFound("No current reading for sensor " + sensorId));
   }
 
+  @Override
+  @Transactional(readOnly = true)
+  public List<SensorLatest> currentStateByZoneAndType(String zone, String sensorType) {
+    return sensorLatestRepo.findByZoneAndSensorType(zone, sensorType);
+  }
+
   /**
    * Registry-derived whitelist (System Design §7): an unknown {@code sensorId}, a
    * {@code sensorType} that doesn't match what the sensor was registered as, or a

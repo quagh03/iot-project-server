@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.command;
 
+import com.huylq.iotprojectserver.audit.AuditLog;
 import com.huylq.iotprojectserver.security.Role;
 
 import java.time.OffsetDateTime;
@@ -46,6 +47,15 @@ public interface CommandService {
    * override permission check; {@code override}/{@code overrideReason} are validated
    * unconditionally (role + non-blank reason) regardless of whether an active safety hold
    * actually exists.
+   *
+   * <p>{@code actorType} distinguishes a human-operator issue ({@link
+   * AuditLog.ActorType#USER}, the only kind Phase 6 had) from a rule-engine issue ({@link
+   * AuditLog.ActorType#SYSTEM}, added in Phase 7): a rule already passed its own write-time
+   * safety review (grammar validation, `ADMIN`-only authorship), so role-based
+   * authorization and the override checks — both meaningless for a non-human caller — are
+   * skipped for {@code SYSTEM}, and {@code callerRole} is {@code null} in that case.
+   * {@code SYSTEM} issues also audit as {@code COMMAND_ISSUE} only, never {@code
+   * MANUAL_COMMAND} — that event specifically means "a human issued this."
    */
   record IssueCommandCmd(
       String targetId,
@@ -55,6 +65,7 @@ public interface CommandService {
       String overrideReason,
       String callerId,
       Role callerRole,
+      AuditLog.ActorType actorType,
       String ip) {
   }
 }

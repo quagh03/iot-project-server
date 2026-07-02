@@ -80,3 +80,5 @@ iot:
     ack-timeout: 30s          # no ack within this window -> TIMEOUT (device-team spec: N unconfirmed, conservative default)
     safety-device-types:      # routine/safety actuator split (no DB column for this)
       - exhst_fan
+  rules:
+    queue-capacity: 1000   # bounded in-process rule-evaluation queue (System Design §5.6)

@@ -5,6 +5,7 @@ import com.huylq.iotprojectserver.api.dto.command.ActuatorStateDto;
 import com.huylq.iotprojectserver.api.dto.command.CommandAckDto;
 import com.huylq.iotprojectserver.api.dto.command.CommandDto;
 import com.huylq.iotprojectserver.api.dto.command.IssueCommandRequest;
+import com.huylq.iotprojectserver.audit.AuditLog;
 import com.huylq.iotprojectserver.command.Command;
 import com.huylq.iotprojectserver.command.CommandPage;
 import com.huylq.iotprojectserver.command.CommandService;
@@ -69,7 +70,7 @@ public class CommandController {
         () -> {
           Command command = commandService.issue(new CommandService.IssueCommandCmd(
               req.targetId(), req.action(), req.parametersOrEmpty(), req.overrideOrFalse(), req.overrideReason(),
-              caller.getSubject(), callerRole, ip));
+              caller.getSubject(), callerRole, AuditLog.ActorType.USER, ip));
           return ResponseEntity.accepted()
               .location(URI.create("/api/v1/commands/" + command.getCommandId()))
               .body(CommandAckDto.from(command));
