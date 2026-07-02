@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.telemetry;
 
+import com.huylq.iotprojectserver.command.CommandRepository;
 import com.huylq.iotprojectserver.registry.Device;
 import com.huylq.iotprojectserver.registry.DeviceRepository;
 import com.huylq.iotprojectserver.registry.Sensor;
@@ -44,9 +45,11 @@ class TelemetryHttpIngestIT {
   @Autowired UserRepository userRepo;
   @Autowired RefreshTokenRepository refreshRepo;
   @Autowired PasswordEncoder encoder;
+  @Autowired CommandRepository commandRepo;
 
   @BeforeEach
   void seed() {
+    commandRepo.deleteAll();
     telemetryRepo.deleteAll();
     sensorLatestRepo.deleteAll();
     credRepo.deleteAll();

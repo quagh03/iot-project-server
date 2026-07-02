@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.telemetry;
 
+import com.huylq.iotprojectserver.command.CommandRepository;
 import com.huylq.iotprojectserver.registry.Device;
 import com.huylq.iotprojectserver.registry.DeviceRepository;
 import com.huylq.iotprojectserver.registry.Sensor;
@@ -40,9 +41,11 @@ class TelemetryRateLimitIT {
   @Autowired DeviceCredentialRepository credRepo;
   @Autowired DeviceScopeRepository scopeRepo;
   @Autowired PasswordEncoder encoder;
+  @Autowired CommandRepository commandRepo;
 
   @BeforeEach
   void seed() {
+    commandRepo.deleteAll();
     credRepo.deleteAll();
     scopeRepo.deleteAll();
     sensorRepo.deleteAll();

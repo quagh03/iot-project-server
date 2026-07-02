@@ -16,6 +16,16 @@ public final class MqttTopics {
   /** {@code iot/status/{device_id}} — broker-published Last Will & Testament (presence). */
   public static final String STATUS_FILTER = "iot/status/+";
 
+  /** {@code iot/command_ack/{device_id}} — device-published receipt/execution ack. */
+  public static final String COMMAND_ACK_FILTER = "iot/command_ack/+";
+
+  private static final String COMMAND_TOPIC_PREFIX = "iot/command/";
+
+  /** {@code iot/command/{device_id}} — app-published command dispatch. */
+  public static String commandTopic(String deviceId) {
+    return COMMAND_TOPIC_PREFIX + deviceId;
+  }
+
   private MqttTopics() {
   }
 }

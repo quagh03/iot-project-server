@@ -25,4 +25,9 @@ public class MqttConfig {
   MqttTopicSubscription statusTopicSubscription(PresenceMqttListener listener) {
     return new MqttTopicSubscription(MqttTopics.STATUS_FILTER, 1, listener);
   }
+
+  @Bean
+  MqttTopicSubscription commandAckTopicSubscription(CommandAckMqttListener listener) {
+    return new MqttTopicSubscription(MqttTopics.COMMAND_ACK_FILTER, 1, listener);
+  }
 }

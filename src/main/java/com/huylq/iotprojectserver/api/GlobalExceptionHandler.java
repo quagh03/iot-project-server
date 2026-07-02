@@ -18,6 +18,7 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
@@ -131,6 +132,19 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     ProblemDetail pd = problemForRequest(HttpStatus.BAD_REQUEST, ErrorType.VALIDATION,
         "Missing required query parameter: " + ex.getParameterName(), request);
     pd.setProperty("errors", List.of(Map.of("field", ex.getParameterName(), "message", "required")));
+    return ResponseEntity.badRequest().body(pd);
+  }
+
+  @Override
+  protected ResponseEntity<Object> handleServletRequestBindingException(ServletRequestBindingException ex,
+                                                                        HttpHeaders headers,
+                                                                        HttpStatusCode status,
+                                                                        WebRequest request) {
+    String field = ex instanceof org.springframework.web.bind.MissingRequestHeaderException mrhe
+        ? mrhe.getHeaderName() : "request";
+    ProblemDetail pd = problemForRequest(HttpStatus.BAD_REQUEST, ErrorType.VALIDATION,
+        "Missing or invalid required header: " + field, request);
+    pd.setProperty("errors", List.of(Map.of("field", field, "message", "required")));
     return ResponseEntity.badRequest().body(pd);
   }
 

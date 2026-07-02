@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.security;
 
+import com.huylq.iotprojectserver.command.CommandRepository;
 import com.huylq.iotprojectserver.registry.DeviceRepository;
 import com.huylq.iotprojectserver.registry.SensorRepository;
 import com.huylq.iotprojectserver.security.device.DeviceCredentialRepository;
@@ -35,11 +36,13 @@ class DeviceCredentialIT {
   @Autowired SensorRepository sensorRepo;
   @Autowired DeviceCredentialRepository credRepo;
   @Autowired DeviceScopeRepository scopeRepo;
+  @Autowired CommandRepository commandRepo;
 
   private String admin;
 
   @BeforeEach
   void setup() throws Exception {
+    commandRepo.deleteAll();
     credRepo.deleteAll();
     scopeRepo.deleteAll();
     sensorRepo.deleteAll();

@@ -48,4 +48,8 @@ public class ApiException extends RuntimeException {
   public static ApiException tokenRevoked(String detail) {
     return new ApiException(ErrorType.TOKEN_REVOKED, HttpStatus.UNAUTHORIZED, detail);
   }
+
+  public static ApiException safetyInterlock(String detail) {
+    return new ApiException(ErrorType.SAFETY_INTERLOCK, HttpStatus.CONFLICT, detail);
+  }
 }

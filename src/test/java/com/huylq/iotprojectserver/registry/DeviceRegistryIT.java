@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.registry;
 
+import com.huylq.iotprojectserver.command.CommandRepository;
 import com.huylq.iotprojectserver.security.Role;
 import com.huylq.iotprojectserver.security.user.RefreshTokenRepository;
 import com.huylq.iotprojectserver.security.user.UserRepository;
@@ -30,9 +31,11 @@ class DeviceRegistryIT {
   @Autowired RefreshTokenRepository refreshRepo;
   @Autowired DeviceRepository deviceRepo;
   @Autowired SensorRepository sensorRepo;
+  @Autowired CommandRepository commandRepo;
 
   @BeforeEach
   void clean() {
+    commandRepo.deleteAll();
     sensorRepo.deleteAll();
     // Child (sensor) devices reference their gateway via a self-FK (ON DELETE RESTRICT),
     // so delete devices that have a parent before the gateways themselves.

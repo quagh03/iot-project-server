@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.mqtt;
 
+import com.huylq.iotprojectserver.command.CommandRepository;
 import com.huylq.iotprojectserver.registry.Device;
 import com.huylq.iotprojectserver.registry.DeviceRepository;
 import com.huylq.iotprojectserver.registry.Sensor;
@@ -34,12 +35,14 @@ class TelemetryMqttIngestIT extends AbstractMqttIT {
   @Autowired SensorRepository sensorRepo;
   @Autowired TelemetryRepository telemetryRepo;
   @Autowired SensorLatestRepository sensorLatestRepo;
+  @Autowired CommandRepository commandRepo;
   @Autowired MqttClientLifecycle appLifecycle;
 
   private MqttClient deviceClient;
 
   @BeforeEach
   void seed() throws Exception {
+    commandRepo.deleteAll();
     telemetryRepo.deleteAll();
     sensorLatestRepo.deleteAll();
     sensorRepo.deleteAll();

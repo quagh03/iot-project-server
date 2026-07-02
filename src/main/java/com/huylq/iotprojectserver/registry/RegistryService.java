@@ -23,6 +23,13 @@ public interface RegistryService {
 
   Device get(String deviceId);
 
+  /**
+   * Registry-derived lookup for ingest/command-time validation (e.g. {@code command}'s
+   * target resolution) — {@link Optional#empty()} rather than a 404, since callers
+   * outside this module treat "unknown device" as their own validation failure.
+   */
+  Optional<Device> find(String deviceId);
+
   Device update(String deviceId, String zone, String deviceType, String firmwareVersion,
                 String callerId, String ip);
 

@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.mqtt;
 
+import com.huylq.iotprojectserver.command.CommandRepository;
 import com.huylq.iotprojectserver.health.DeviceHealth;
 import com.huylq.iotprojectserver.health.DeviceHealthRepository;
 import com.huylq.iotprojectserver.registry.Device;
@@ -33,12 +34,14 @@ class HeartbeatMqttIngestIT extends AbstractMqttIT {
   @Autowired DeviceRepository deviceRepo;
   @Autowired SensorRepository sensorRepo;
   @Autowired DeviceHealthRepository healthRepo;
+  @Autowired CommandRepository commandRepo;
   @Autowired MqttClientLifecycle appLifecycle;
 
   private MqttClient deviceClient;
 
   @BeforeEach
   void seed() throws Exception {
+    commandRepo.deleteAll();
     healthRepo.deleteAll();
     sensorRepo.deleteAll();
     deviceRepo.deleteAll(deviceRepo.findAll().stream()

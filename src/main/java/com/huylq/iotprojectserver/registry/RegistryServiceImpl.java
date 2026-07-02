@@ -99,6 +99,12 @@ class RegistryServiceImpl implements RegistryService {
   }
 
   @Override
+  @Transactional(readOnly = true)
+  public Optional<Device> find(String deviceId) {
+    return deviceRepo.findById(deviceId);
+  }
+
+  @Override
   @Transactional
   public Device update(String deviceId, String zone, String deviceType, String firmwareVersion,
                        String callerId, String ip) {

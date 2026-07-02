@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.security;
 
+import com.huylq.iotprojectserver.command.CommandRepository;
 import com.huylq.iotprojectserver.registry.Device;
 import com.huylq.iotprojectserver.security.device.DeviceCredential;
 import com.huylq.iotprojectserver.security.device.DeviceScope;
@@ -25,9 +26,11 @@ class DeviceTokenIT {
     @Autowired DeviceCredentialRepository credRepo;
     @Autowired DeviceScopeRepository scopeRepo;
     @Autowired PasswordEncoder encoder;
+    @Autowired CommandRepository commandRepo;
 
     @BeforeEach
     void seed() {
+        commandRepo.deleteAll();
         credRepo.deleteAll();
         scopeRepo.deleteAll();
         deviceRepo.deleteAll();

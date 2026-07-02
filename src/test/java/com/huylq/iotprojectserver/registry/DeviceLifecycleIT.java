@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.registry;
 
+import com.huylq.iotprojectserver.command.CommandRepository;
 import com.huylq.iotprojectserver.security.Role;
 import com.huylq.iotprojectserver.security.device.DeviceCredentialRepository;
 import com.huylq.iotprojectserver.security.device.DeviceScopeRepository;
@@ -33,11 +34,13 @@ class DeviceLifecycleIT {
   @Autowired SensorRepository sensorRepo;
   @Autowired DeviceCredentialRepository credRepo;
   @Autowired DeviceScopeRepository scopeRepo;
+  @Autowired CommandRepository commandRepo;
 
   private String admin;
 
   @BeforeEach
   void clean() throws Exception {
+    commandRepo.deleteAll();
     credRepo.deleteAll();
     scopeRepo.deleteAll();
     sensorRepo.deleteAll();

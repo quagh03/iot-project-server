@@ -1,5 +1,6 @@
 package com.huylq.iotprojectserver.telemetry;
 
+import com.huylq.iotprojectserver.command.CommandRepository;
 import com.huylq.iotprojectserver.registry.Device;
 import com.huylq.iotprojectserver.registry.DeviceRepository;
 import com.huylq.iotprojectserver.registry.Sensor;
@@ -37,11 +38,13 @@ class TelemetryHistoryQueryIT {
   @Autowired TelemetryRepository telemetryRepo;
   @Autowired UserRepository userRepo;
   @Autowired RefreshTokenRepository refreshRepo;
+  @Autowired CommandRepository commandRepo;
 
   private static final OffsetDateTime BASE = OffsetDateTime.of(2026, 6, 25, 10, 0, 0, 0, ZoneOffset.UTC);
 
   @BeforeEach
   void seed() {
+    commandRepo.deleteAll();
     telemetryRepo.deleteAll();
     sensorRepo.deleteAll();
     // Child (sensor) devices reference their gateway via a self-FK (ON DELETE RESTRICT),

@@ -35,6 +35,13 @@ public enum AuditEvent {
   DEVICE_CREDENTIAL_ROTATE("device.credential.rotate"),
   DEVICE_SCOPES_REPLACE("device.scopes.replace"),
 
+  // ---- command / operator control plane (Phase 6) ------------------------------------
+  COMMAND_ISSUE("command.issue"),
+  COMMAND_EXECUTE("command.execute"),
+  COMMAND_TIMEOUT("command.timeout"),
+  MANUAL_COMMAND("command.manual"),
+  SAFETY_OVERRIDE("command.safety-override"),
+
   // ---- system (PartitionManager, retention sweeper, scheduled jobs) ------------------
   PARTITION_CREATED("partition.created"),
   PARTITION_DROPPED("partition.dropped");

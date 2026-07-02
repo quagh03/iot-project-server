@@ -76,3 +76,7 @@ iot:
     history-max-window: 7d      # GET /v1/telemetry rejects a from/to span wider than this
   health:
     stale-after: 3m   # staleness sweep: mark OFFLINE if last_seen exceeds this (defense-in-depth alongside LWT)
+  command:
+    ack-timeout: 30s          # no ack within this window -> TIMEOUT (device-team spec: N unconfirmed, conservative default)
+    safety-device-types:      # routine/safety actuator split (no DB column for this)
+      - exhst_fan

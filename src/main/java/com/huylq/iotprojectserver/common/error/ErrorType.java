@@ -18,6 +18,7 @@ public enum ErrorType {
   INVALID_LIFECYCLE_TRANSITION("https://api.iot.example.com/errors/invalid-lifecycle-transition"),
   RATE_LIMITED("https://api.iot.example.com/errors/rate-limited"),
   UNAVAILABLE("https://api.iot.example.com/errors/unavailable"),
+  SAFETY_INTERLOCK("https://api.iot.example.com/errors/safety-interlock"),
   INTERNAL("https://api.iot.example.com/errors/internal");
 
   private final URI uri;
