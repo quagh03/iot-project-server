@@ -61,7 +61,7 @@ On the `local` profile the app:
 - applies all Flyway migrations to `jdbc:postgresql://localhost:5432/iot`,
 - connects to the broker at `tcp://localhost:1883` (an unreachable broker never blocks startup — it retries in the background),
 - generates an ephemeral RSA keypair for JWT signing (no config needed),
-- seeds dev fixtures: users **`admin` / `changeme`** (SUPER_ADMIN) and **`user` / `changeme`** (VIEWER), plus a sample zone `office_1` with gateway `gw_office1_01`, sensors `s_temp_1` / `s_smoke_1`, and actuator `act_exhaust_1`.
+- seeds dev fixtures: one user per role (password `changeme` for all) — **`admin`** (SUPER_ADMIN), **`manager`** (ADMIN), **`operator`** (OPERATOR), **`tech`** (TECHNICIAN), **`user`** (VIEWER) — plus two live zones (`office_1`, `meeting`) with gateways, sensors and actuators in every lifecycle state, ~6 h of telemetry history and current state, device health, commands across the lifecycle (one deliberately drifted actuator), enabled/disabled rules (including the smoke → exhaust-fan safety rule), and alerts in all three statuses.
 
 The API is now at **`http://localhost:8080/api/v1`**, Swagger UI at **`http://localhost:8080/api/v1/swagger-ui.html`**, health probe at `http://localhost:8080/actuator/health`.
 
