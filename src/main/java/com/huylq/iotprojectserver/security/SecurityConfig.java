@@ -86,8 +86,11 @@ public class SecurityConfig {
     NimbusJwtDecoder decoder = NimbusJwtDecoder.withJwkSource(jwkSource)
         .jwsAlgorithm(SignatureAlgorithm.RS256)
         .build();
+    // Denylist runs ahead of issuer/expiry checks (§7) — a revoked-but-still-time-valid
+    // token should fail for the "it's revoked" reason, not get a chance to pass the
+    // cheaper structural checks first.
     OAuth2TokenValidator<Jwt> defaults = JwtValidators.createDefault();
-    decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(defaults, denylistValidator));
+    decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(denylistValidator, defaults));
     return decoder;
   }
 

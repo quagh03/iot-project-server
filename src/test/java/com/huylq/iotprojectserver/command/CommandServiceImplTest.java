@@ -196,7 +196,7 @@ class CommandServiceImplTest {
   @Test
   void active_safety_hold_blocks_admin_without_override() {
     when(registry.find("exhst_1")).thenReturn(Optional.of(actuator("exhst_1", "exhst_fan", Device.Status.ACTIVE)));
-    when(safetyInterlock.violatesActiveSafety(eq("exhst_1"), anyString(), any())).thenReturn(true);
+    when(safetyInterlock.violatesActiveSafety(eq("exhst_1"), anyString(), anyString(), anyString())).thenReturn(true);
 
     assertThatThrownBy(() -> service.issue(cmd("exhst_1", "SET", Map.of("status", "OFF"), Role.ADMIN, false, null)))
         .isInstanceOfSatisfying(ApiException.class,
@@ -207,7 +207,7 @@ class CommandServiceImplTest {
   @Test
   void super_admin_override_bypasses_interlock_and_audits() {
     when(registry.find("exhst_1")).thenReturn(Optional.of(actuator("exhst_1", "exhst_fan", Device.Status.ACTIVE)));
-    when(safetyInterlock.violatesActiveSafety(eq("exhst_1"), anyString(), any())).thenReturn(true);
+    when(safetyInterlock.violatesActiveSafety(eq("exhst_1"), anyString(), anyString(), anyString())).thenReturn(true);
 
     service.issue(cmd("exhst_1", "SET", Map.of("status", "OFF"), Role.SUPER_ADMIN, true, "fire drill confirmed safe"));
 

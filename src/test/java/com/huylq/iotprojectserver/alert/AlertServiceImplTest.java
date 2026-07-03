@@ -174,4 +174,19 @@ class AlertServiceImplTest {
     assertThat(result.items()).hasSize(1);
     assertThat(result.hasMore()).isFalse();
   }
+
+  // ---- existsOpenAlert (OpenAlertQuery, consumed by command's safety interlock) -----------
+
+  @Test
+  void exists_open_alert_delegates_to_repository() {
+    when(repo.existsByZoneAndTypeInAndStatus("office_1", List.of("SMOKE"), Alert.Status.OPEN)).thenReturn(true);
+
+    assertThat(service.existsOpenAlert("office_1", List.of("SMOKE"))).isTrue();
+  }
+
+  @Test
+  void exists_open_alert_short_circuits_on_empty_type_list() {
+    assertThat(service.existsOpenAlert("office_1", List.of())).isFalse();
+    verify(repo, org.mockito.Mockito.never()).existsByZoneAndTypeInAndStatus(any(), any(), any());
+  }
 }

@@ -63,7 +63,7 @@ class CommandIT {
     deviceRepo.deleteAll();
     refreshRepo.deleteAll();
     userRepo.deleteAll();
-    when(safetyInterlockCheck.violatesActiveSafety(anyString(), anyString(), any())).thenReturn(false);
+    when(safetyInterlockCheck.violatesActiveSafety(anyString(), anyString(), anyString(), anyString())).thenReturn(false);
 
     support.createUser("admin", "s3cret-string-32-bytes-long-now", Role.ADMIN);
     support.createUser("super", "s3cret-string-32-bytes-long-now", Role.SUPER_ADMIN);
@@ -240,7 +240,8 @@ class CommandIT {
 
   @Test
   void active_safety_hold_returns_409_and_super_admin_can_override() throws Exception {
-    when(safetyInterlockCheck.violatesActiveSafety(org.mockito.ArgumentMatchers.eq("exhst_1"), anyString(), any()))
+    when(safetyInterlockCheck.violatesActiveSafety(
+        org.mockito.ArgumentMatchers.eq("exhst_1"), anyString(), anyString(), anyString()))
         .thenReturn(true);
 
     String admin = loginAs("admin");
@@ -263,7 +264,7 @@ class CommandIT {
 
   @Test
   void override_by_admin_is_forbidden() throws Exception {
-    when(safetyInterlockCheck.violatesActiveSafety(anyString(), anyString(), any())).thenReturn(true);
+    when(safetyInterlockCheck.violatesActiveSafety(anyString(), anyString(), anyString(), anyString())).thenReturn(true);
     String admin = loginAs("admin");
     mvc.perform(post("/api/v1/commands")
             .header("Authorization", "Bearer " + admin).header("Idempotency-Key", UUID.randomUUID().toString())

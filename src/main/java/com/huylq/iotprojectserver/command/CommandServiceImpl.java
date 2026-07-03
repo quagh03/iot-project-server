@@ -206,7 +206,7 @@ class CommandServiceImpl implements CommandService {
         if (safety) throw ApiException.forbidden("TECHNICIAN may not command a safety actuator");
       }
       case OPERATOR -> {
-        if (safety && isDeEscalating(validated.desiredState())) {
+        if (safety && ActuatorStates.isDeEscalating(validated.desiredState())) {
           throw ApiException.forbidden("OPERATOR may only turn a safety actuator ON/escalate");
         }
       }
@@ -214,12 +214,6 @@ class CommandServiceImpl implements CommandService {
         // unrestricted by actuator class
       }
     }
-  }
-
-  private static boolean isDeEscalating(String desiredState) {
-    return "OFF".equalsIgnoreCase(desiredState)
-        || "STOP".equalsIgnoreCase(desiredState)
-        || "CLOSED".equalsIgnoreCase(desiredState);
   }
 
   /**
@@ -242,7 +236,8 @@ class CommandServiceImpl implements CommandService {
    * @return true if an active safety hold existed and was successfully overridden.
    */
   private boolean checkSafetyInterlock(IssueCommandCmd cmd, Device target, ValidatedCommand validated, String commandId) {
-    boolean held = safetyInterlock.violatesActiveSafety(target.getDeviceId(), cmd.action(), cmd.parameters());
+    boolean held = safetyInterlock.violatesActiveSafety(
+        target.getDeviceId(), target.getZone(), target.getDeviceType(), validated.desiredState());
     if (!held) return false;
     if (cmd.callerRole() == Role.SUPER_ADMIN && cmd.override()) {
       log.warn("SUPER_ADMIN {} overriding active safety hold on {} (commandId={})",

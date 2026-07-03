@@ -18,17 +18,24 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
 @Slf4j
-class AlertServiceImpl implements AlertService {
+class AlertServiceImpl implements AlertService, OpenAlertQuery {
 
   private final AlertRepository repo;
   private final RegistryService registry;
   private final AuditService audit;
+
+  @Override
+  @Transactional(readOnly = true)
+  public boolean existsOpenAlert(String zone, Collection<String> types) {
+    return !types.isEmpty() && repo.existsByZoneAndTypeInAndStatus(zone, types, Alert.Status.OPEN);
+  }
 
   /**
    * {@code REQUIRES_NEW} — a detection-signal alert (Phase 10) is very often raised from
